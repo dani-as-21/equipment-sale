@@ -919,11 +919,33 @@
   const VAL_IMPACT = { blocking: "חוסם", material: "משנה את השווי", helpful: "מועיל", not_applicable: "לא רלוונטי" };
   const PRICE_TYPE = { asking: "מחיר מבוקש", transaction: "עסקה", hammer: "מחיר פטיש", buyer_total: "סה״כ לקונה", replacement: "מחיר תחליף", buyer_offer: "הצעת קונה", specialist_opinion: "חוות דעת" };
 
+  let valueLoadSeq = 0;
   async function loadValue() {
+    const seq = ++valueLoadSeq;
     const params = new URLSearchParams({ q: S.valueQuery || "", family: S.valueFamily || "", info: S.valueInfo || "" });
-    const response = await fetch("/api/valuation/overview?" + params.toString(), { credentials: "include" });
-    if (response.ok) S.valueOverview = await response.json();
+    try {
+      const response = await fetch("/api/valuation/overview?" + params.toString(), { credentials: "include" });
+      if (seq !== valueLoadSeq) return;
+      if (!response.ok) {
+        S.error = "מוכנות השווי לא נטענה.";
+      } else {
+        S.error = "";
+        S.valueOverview = await response.json();
+      }
+    } catch (error) {
+      if (seq !== valueLoadSeq) return;
+      S.error = "מוכנות השווי לא נטענה. בדקו את החיבור.";
+    }
+    if (seq !== valueLoadSeq) return;
+    const typed = document.activeElement && document.activeElement.name === "q" ? document.activeElement.value : null;
     render();
+    if (typed != null) {
+      const again = document.querySelector("input[name=q]");
+      if (again) {
+        again.value = typed;
+        again.focus();
+      }
+    }
   }
   async function loadValueDetail(rowId) {
     if (!rowId) return;
@@ -1167,13 +1189,15 @@
   function go(screen) {
     S.screen = screen;
     S.error = "";
-    location.hash = "#/" + screen;
+    const nextHash = "#/" + screen;
+    const changing = location.hash !== nextHash;
+    if (changing) location.hash = nextHash;
     if (screen === "import" && !S.importPreview) loadImport();
     if (screen === "ready") runReady();
-    if (screen === "value") loadValue();
-    if (screen === "comparables") loadComparables();
-    if (screen === "visit-prep") loadVisitPrep();
-    render();
+    if (!changing && screen === "value") loadValue();
+    if (!changing && screen === "comparables") loadComparables();
+    if (!changing && screen === "visit-prep") loadVisitPrep();
+    if (!changing) render();
   }
 
   async function loadImport() {
@@ -1200,7 +1224,7 @@
   }
 
   document.getElementById("app").addEventListener("click", async (event) => {
-    const target = event.target.closest("[data-action], [data-go], [data-go-row]");
+    const target = event.target.closest("[data-action], [data-go], [data-go-row], [data-go-value]");
     if (!target) return;
     if (target.dataset.go) {
       go(target.dataset.go);

@@ -22,7 +22,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 button { cursor: pointer; }
 .ltr, bdi { direction: ltr; unicode-bidi: isolate; }
 
-.shell { max-width: 920px; margin: 0 auto; padding: 12px 12px 108px; }
+.shell { max-width: 920px; margin: 0 auto; padding: 12px 12px 128px; }
 .top {
   position: sticky; top: 0; z-index: 5;
   background: rgba(239, 234, 226, 0.94);
@@ -82,6 +82,7 @@ textarea { min-height: 72px; resize: vertical; }
 
 .list-item {
   display: grid; grid-template-columns: 64px 1fr; gap: 10px; align-items: center;
+  scroll-margin-bottom: 140px;
   width: 100%; text-align: right; background: var(--surface); border: 1px solid var(--line);
   border-radius: 14px; padding: 8px; margin: 8px 0;
 }
