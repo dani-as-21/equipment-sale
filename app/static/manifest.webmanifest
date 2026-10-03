@@ -1,0 +1,10 @@
+{
+  "name": "סיור ציוד",
+  "short_name": "סיור",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#efeae2",
+  "theme_color": "#0f5c50",
+  "lang": "he",
+  "dir": "rtl"
+}
