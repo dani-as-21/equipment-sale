@@ -877,6 +877,11 @@ def review_action(conn: sqlite3.Connection, review_id: str, body: dict, created_
                 created_at,
             )
         return {"status": "open", "corrected": True}
+    if action == "resolve" and str(item["kind"]).startswith("valuation"):
+        return {
+            "status": item["status"],
+            "missing": "עונים על שאלת השווי מכרטיס השווי, כדי שהתשובה תתעדכן במוכנות ולא תיכנס כמחיר.",
+        }
     if action == "resolve":
         text = (body.get("text") or "").strip()
         if len(text) < 2:
@@ -927,7 +932,9 @@ def row_documentation(conn: sqlite3.Connection) -> dict[str, dict]:
         elif status == "auto_linked" and row_id not in identity:
             identity[row_id] = "auto_linked"
     review_rows: set[str] = set()
-    for review in conn.execute("SELECT row_ids_json, status FROM review_items WHERE status IN ('open', 'deferred')"):
+    for review in conn.execute(
+        "SELECT row_ids_json, status FROM review_items WHERE status IN ('open', 'deferred') AND queue != 'valuation'"
+    ):
         review_rows.update(parse_json(review["row_ids_json"], []))
     flags = {}
     for row in conn.execute("SELECT id, kind, listed_area, sheet_name, duplicate_group FROM inventory_rows"):

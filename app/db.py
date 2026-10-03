@@ -155,12 +155,147 @@ CREATE TABLE IF NOT EXISTS import_notes (
   text TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS valuation_subjects (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,
+  title TEXT NOT NULL,
+  row_id TEXT,
+  quantity_text TEXT,
+  included_text TEXT,
+  excluded_text TEXT,
+  family TEXT NOT NULL,
+  subtype TEXT,
+  family_evidence TEXT,
+  family_source TEXT NOT NULL,
+  premise TEXT NOT NULL DEFAULT 'unset',
+  condition_status TEXT NOT NULL DEFAULT 'unknown',
+  condition_text TEXT,
+  market_text TEXT,
+  currency TEXT,
+  tax_basis TEXT,
+  price_boundary TEXT,
+  marketing_period TEXT,
+  project_target TEXT NOT NULL,
+  assumptions TEXT,
+  limitations TEXT,
+  research_status TEXT NOT NULL DEFAULT 'not_researched',
+  method_preference TEXT NOT NULL DEFAULT 'unset',
+  replacement_allowance TEXT,
+  review_due TEXT,
+  updated_at TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS valuation_members (
+  subject_id TEXT NOT NULL,
+  row_id TEXT NOT NULL,
+  role TEXT NOT NULL DEFAULT 'included',
+  PRIMARY KEY (subject_id, row_id)
+);
+
+CREATE TABLE IF NOT EXISTS valuation_requirements (
+  id TEXT PRIMARY KEY,
+  subject_id TEXT NOT NULL,
+  req_key TEXT NOT NULL,
+  impact TEXT NOT NULL,
+  question TEXT NOT NULL,
+  why TEXT NOT NULL,
+  how_to TEXT NOT NULL,
+  contact_role TEXT NOT NULL,
+  site_presence TEXT NOT NULL,
+  priority TEXT NOT NULL,
+  evidence_status TEXT NOT NULL,
+  evidence_json TEXT NOT NULL DEFAULT '[]',
+  answer_text TEXT,
+  na_reason TEXT,
+  consequence TEXT,
+  answered_by TEXT,
+  UNIQUE(subject_id, req_key)
+);
+
+CREATE TABLE IF NOT EXISTS valuation_files (
+  id TEXT PRIMARY KEY,
+  subject_id TEXT NOT NULL,
+  requirement_id TEXT,
+  stored_path TEXT NOT NULL,
+  thumb_path TEXT,
+  original_name TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS market_evidence (
+  id TEXT PRIMARY KEY,
+  subject_id TEXT NOT NULL,
+  source_url TEXT,
+  source_document TEXT,
+  title TEXT NOT NULL,
+  research_date TEXT NOT NULL,
+  listing_date TEXT,
+  seller_type TEXT,
+  identifiers TEXT,
+  specifications TEXT,
+  condition_text TEXT,
+  location TEXT,
+  price_text TEXT,
+  price_amount REAL,
+  currency TEXT,
+  tax_treatment TEXT,
+  included_services TEXT,
+  price_type TEXT NOT NULL,
+  role TEXT NOT NULL,
+  exclusion_reason TEXT,
+  differences TEXT,
+  adjustment_note TEXT,
+  duplicate_of TEXT,
+  limitations TEXT,
+  added_by TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS valuation_versions (
+  id TEXT PRIMARY KEY,
+  subject_id TEXT NOT NULL,
+  version_no INTEGER NOT NULL,
+  status TEXT NOT NULL,
+  info_readiness TEXT NOT NULL,
+  market_readiness TEXT NOT NULL,
+  range_low REAL,
+  range_high REAL,
+  currency TEXT,
+  range_label TEXT NOT NULL,
+  confidence TEXT,
+  confidence_why TEXT,
+  method TEXT,
+  method_why TEXT,
+  assumptions TEXT,
+  sensitivities TEXT,
+  outdated INTEGER NOT NULL DEFAULT 0,
+  outdated_reason TEXT,
+  author TEXT NOT NULL,
+  reviewer_name TEXT,
+  reviewer_scope TEXT,
+  scenario TEXT NOT NULL DEFAULT 'normal_marketing',
+  evidence_ids_json TEXT NOT NULL DEFAULT '[]',
+  created_at TEXT NOT NULL,
+  UNIQUE(subject_id, scenario, version_no)
+);
+
+CREATE TABLE IF NOT EXISTS commercial_positions (
+  row_id TEXT PRIMARY KEY,
+  offer_text TEXT,
+  target_text TEXT,
+  note TEXT,
+  updated_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_rows_tag ON inventory_rows(tag_norm);
 CREATE INDEX IF NOT EXISTS idx_rows_kind ON inventory_rows(kind);
 CREATE INDEX IF NOT EXISTS idx_photos_capture ON photos(capture_id);
 CREATE INDEX IF NOT EXISTS idx_links_row ON evidence_links(inventory_row_id);
 CREATE INDEX IF NOT EXISTS idx_links_capture ON evidence_links(capture_id);
 CREATE INDEX IF NOT EXISTS idx_review_status ON review_items(status);
+CREATE INDEX IF NOT EXISTS idx_val_req_subject ON valuation_requirements(subject_id);
+CREATE INDEX IF NOT EXISTS idx_val_evidence_subject ON market_evidence(subject_id);
 """
 
 

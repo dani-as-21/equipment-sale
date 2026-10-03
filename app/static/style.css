@@ -74,8 +74,10 @@ textarea { min-height: 72px; resize: vertical; }
   padding-bottom: env(safe-area-inset-bottom);
 }
 .nav button {
-  flex: 1; border: 0; background: transparent; min-height: 64px; color: var(--muted);
+  flex: 1; border: 0; background: transparent; min-height: 64px; color: var(--muted); font-size: 0.82rem;
 }
+.commercial { border-style: dashed; background: transparent; }
+.facts div, .check div { padding: 6px 0; border-bottom: 1px solid var(--line); }
 .nav button.active { color: var(--accent); font-weight: 700; }
 
 .list-item {

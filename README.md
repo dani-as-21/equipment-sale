@@ -58,3 +58,34 @@ python3 -m pytest tests -q
 6. Use **מלאי** to open a row, **בדיקה** for open questions, and **סיכום** for counts and the export.
 
 Automatic linking happens only for an exact unique tag or serial, or for an identical same-area duplicate group, and only when the observed area does not conflict with the listed area. Similar names, models, and partial tags are suggestions. Unknown location is allowed.
+
+## Valuation readiness
+
+The same inventory rows, photos, and review tasks feed a valuation module. Capture stays the screen after login. Open **שווי** or the link on an inventory row.
+
+The card shows what is being valued, which facts already come from the file or from photos, and what is still missing. A current-value range appears only when at least two comparable observations share a price type, currency, and an asset-only price. Otherwise the card says **אין די ראיות להערכה**. Nothing in this release invents a price, a comparable, or a contact name.
+
+Live web research is not available. The screen says so and opens a research task. Asking prices, completed transactions, hammer prices, buyer totals, replacement prices, and interested-buyer offers stay labeled and are not mixed into one range. A repeated listing is not a second observation. A price that bundles delivery or installation is not treated as an asset-only price. The spreadsheet column `price` is not a purchase cost and is not depreciated into a value.
+
+The project date 31 December 2026 stays visible. It does not turn the normal-marketing estimate into a quick-sale price. A separate time-constrained scenario can be added, and it has no price unless evidence supports one. A purchase offer and a target price can be stored on the row, outside the valuation card, and are not inputs to the range.
+
+A photograph does not mark operating condition, calibration, or relocation as verified.
+
+| Addendum check | Where it is covered |
+|---|---|
+| 1. Reuse file facts and list real gaps | `tests/test_valuation.py`: generator `X-9013` keeps `1427 KW` from the sheet |
+| 2. Different families, different checklists | Generator, lab balance `RDBAL-01`, and reactor `R-707` |
+| 3. Unknown identity is a task, not a price | `V-0514` has no description and no range |
+| 4. Every request has a reason, method, and role | Requirement fields on the card and in the visit list |
+| 5. An answer updates readiness without a second inventory | Manufacturer answer stays on the valuation requirement |
+| 6. Research can start early and add a requirement | Research task exists before every field is filled; a fuel question can be added |
+| 7. Full information and no market evidence abstains | `A-707` after answers: market state insufficient, no range |
+| 8. Price types stay distinct | Asking, buyer offer, and replacement are stored as different types |
+| 9. Duplicate listings do not count twice | Same URL is marked as a copy |
+| 10. Bundled service prices are not direct comps | Delivery/installation price is kept as context |
+| 11. No invented percent or depreciation | A submitted percent is ignored; `price` is not a cost basis |
+| 12. The live offer is outside the valuation | `777001` / `888002` are absent from the valuation payload |
+| 13. A range has evidence, method, and assumptions | Two asset-only asking prices produce a low–high range |
+| 14. A basis change keeps the prior version | Changing the premise marks the old version outdated |
+| 15. Existing records are reused | Equipment row count is unchanged |
+| 16. A photo is not a test | A condition photo stays “missing” |

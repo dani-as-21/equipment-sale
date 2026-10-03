@@ -31,6 +31,13 @@
     listLimit: 40,
     syncing: false,
     offlineTest: null,
+    valueOverview: null,
+    valueDetail: null,
+    valueQuery: "",
+    valueFamily: "",
+    valueInfo: "",
+    comparables: null,
+    visitPrep: null,
   };
 
   const STATUS_HE = {
@@ -122,6 +129,10 @@
     else if (location.hash.startsWith("#/visit")) S.screen = "visit";
     else if (location.hash.startsWith("#/ready")) S.screen = "ready";
     else if (location.hash.startsWith("#/import")) S.screen = "import";
+    else if (location.hash.startsWith("#/value/row/")) S.screen = "value-detail";
+    else if (location.hash.startsWith("#/value")) S.screen = "value";
+    else if (location.hash.startsWith("#/comparables")) S.screen = "comparables";
+    else if (location.hash.startsWith("#/visit-prep")) S.screen = "visit-prep";
     else S.screen = "capture";
     try {
       await Store.openDb();
@@ -562,6 +573,7 @@
         <button type="button" data-go="inventory" class="${S.screen === "inventory" || S.screen === "row" ? "active" : ""}">מלאי</button>
         <button type="button" data-go="review" class="${S.screen === "review" ? "active" : ""}">בדיקה${openReviews ? " (" + openReviews + ")" : ""}</button>
         <button type="button" data-go="visit" class="${S.screen === "visit" ? "active" : ""}">סיכום</button>
+        <button type="button" data-go="value" class="${S.screen === "value" || S.screen === "value-detail" ? "active" : ""}">שווי</button>
       </nav>`;
   }
 
@@ -738,6 +750,8 @@
           ${flag.identity === "user_confirmed" ? `<span class="chip ok">אושר ידנית</span>` : ""}
           ${(row.labels || []).map((label) => `<span class="chip warn">${esc(label)}</span>`).join("")}
         </div>
+        <p><a href="#/value/row/${esc(row.id)}">כרטיס שווי של השורה הזו</a></p>
+        <p class="hint">השווי נשען על אותה שורה ועל אותם צילומים. עובדה שכבר בקובץ לא מוקלדת מחדש.</p>
         <p><b>אזור ברשימה:</b> ${ltr(row.listed_area || "לא ידוע")}</p>
         <p><b>אזור שנצפה:</b> ${observed.length ? observed.map((area) => ltr(area)).join(", ") : "עדיין לא נצפה בסיור"}</p>
         ${differ ? `<div class="warn">האזור בסיור והאזור ברשימה שונים. שניהם נשמרים.</div>` : ""}
@@ -756,13 +770,14 @@
   }
 
   function renderReview() {
-    const items = S.reviews.filter((review) => S.reviewFilter === "all" ? true : (S.reviewFilter === "visit" ? review.queue === "visit" : review.queue !== "visit"));
+    const items = S.reviews.filter((review) => S.reviewFilter === "all" ? true : review.queue === S.reviewFilter);
     const open = S.activeReview ? S.reviews.find((review) => review.id === S.activeReview) : null;
     if (open) return renderReviewDetail(open);
     return `
       <div class="filters">
         <button type="button" data-action="rev-filter" data-filter="visit" class="${S.reviewFilter === "visit" ? "on" : ""}">מהסיור</button>
         <button type="button" data-action="rev-filter" data-filter="import" class="${S.reviewFilter === "import" ? "on" : ""}">מהקובץ</button>
+        <button type="button" data-action="rev-filter" data-filter="valuation" class="${S.reviewFilter === "valuation" ? "on" : ""}">שווי</button>
       </div>
       <p class="hint">כאן שאלות על תג לא חד-משמעי, אזור סותר, תג כפול, פריט בלי התאמה, שלט לא קריא, או קשר לא ברור.</p>
       ${items.filter((review) => review.status !== "resolved").map((review) => `
@@ -777,12 +792,14 @@
     const photos = review.capture_id ? photosOf(review.capture_id) : [];
     const rowIds = review.row_ids || [];
     const rows = rowIds.map((id) => S.rowById[id]).filter(Boolean);
+    const valueLink = review.queue === "valuation" && rowIds[0] ? `<p><a href="#/value/row/${esc(rowIds[0])}">פתחו את כרטיס השווי כדי לענות. תשובה כאן לא מייצרת מחיר.</a></p>` : "";
     return `
       <button class="btn-quiet" type="button" data-action="close-review">חזרה</button>
       <div class="split">
         <div class="card">
           <h2>השאלה</h2>
           <p>${esc(review.question)}</p>
+          ${valueLink}
           ${review.missing_reason ? `<div class="warn">${esc(review.missing_reason)}</div>` : ""}
           ${cap ? `<p class="hint">אזור שנצפה: ${ltr(cap.observed_area_name || "לא ידוע")} · תג שהוקלד: ${ltr(cap.tag_text || "")}</p><p>${esc(cap.note || "")}</p>` : ""}
           ${photos.map((photo) => `<img src="${esc(photo.url || `/api/photos/${photo.id}/thumb`)}" alt="צילום" style="width:100%;border-radius:12px;margin:6px 0">`).join("") || `<p class="hint">אין צילום לשאלה הזו.</p>`}
@@ -898,6 +915,235 @@
       </div>`;
   }
 
+  const VAL_STATUS = { supported: "נתמך במקור", missing: "חסר", conflict: "יש סתירה", unable: "לא ניתן להשיג", not_applicable: "לא רלוונטי" };
+  const VAL_IMPACT = { blocking: "חוסם", material: "משנה את השווי", helpful: "מועיל", not_applicable: "לא רלוונטי" };
+  const PRICE_TYPE = { asking: "מחיר מבוקש", transaction: "עסקה", hammer: "מחיר פטיש", buyer_total: "סה״כ לקונה", replacement: "מחיר תחליף", buyer_offer: "הצעת קונה", specialist_opinion: "חוות דעת" };
+
+  async function loadValue() {
+    const params = new URLSearchParams({ q: S.valueQuery || "", family: S.valueFamily || "", info: S.valueInfo || "" });
+    const response = await fetch("/api/valuation/overview?" + params.toString(), { credentials: "include" });
+    if (response.ok) S.valueOverview = await response.json();
+    render();
+  }
+  async function loadValueDetail(rowId) {
+    if (!rowId) return;
+    const response = await fetch("/api/valuation/subjects", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ row_id: rowId }),
+    });
+    if (!response.ok) {
+      S.error = "כרטיס השווי לא נפתח.";
+      render();
+      return;
+    }
+    S.valueDetail = await response.json();
+    render();
+  }
+  async function loadComparables() {
+    const subject = S.valueDetail && S.valueDetail.id ? S.valueDetail.id : "";
+    const response = await fetch("/api/valuation/comparables?subject_id=" + encodeURIComponent(subject), { credentials: "include" });
+    if (response.ok) S.comparables = await response.json();
+    render();
+  }
+  async function loadVisitPrep() {
+    const response = await fetch("/api/valuation/visit-prep", { credentials: "include" });
+    if (response.ok) S.visitPrep = await response.json();
+    render();
+  }
+
+  function renderValue() {
+    const data = S.valueOverview;
+    if (!data) return `<div class="card"><p>טוען את מוכנות השווי…</p></div>`;
+    const families = ["", "generator", "reactor", "lab_instrument", "agitator", "pump", "heat_exchanger", "cooling_tower", "building", "unknown", "other_named"];
+    const familyNames = { "": "כל המשפחות", generator: "גנרטור", reactor: "כור", lab_instrument: "מעבדה", agitator: "מערבל", pump: "משאבה", heat_exchanger: "מחליף חום", cooling_tower: "מגדל קירור", building: "מבנה יביל", unknown: "לא זוהה", other_named: "לפי התיאור" };
+    return `
+      <div class="card">
+        <h2>מוכנות לשווי</h2>
+        <p class="hint">${esc(data.research_limitation)}</p>
+        <p class="hint">${esc(data.project_target_note)}</p>
+        <p class="hint">${esc(data.appraisal_label)} אין כאן אחוז השלמה.</p>
+        <p><a href="#/visit-prep">רשימה לסיור</a> · <a href="#/comparables">ראיות שוק</a></p>
+      </div>
+      <form data-action="value-filter" class="card">
+        <label>חיפוש<input name="q" value="${esc(S.valueQuery)}" placeholder="תג או תיאור"></label>
+        <label>משפחה<select name="family">${families.map((id) => `<option value="${id}" ${S.valueFamily === id ? "selected" : ""}>${familyNames[id]}</option>`).join("")}</select></label>
+        <label>מידע<select name="info">
+          <option value="">כל מצבי המידע</option>
+          <option value="identification_unresolved" ${S.valueInfo === "identification_unresolved" ? "selected" : ""}>הזיהוי לא הוכרע</option>
+          <option value="critical_missing" ${S.valueInfo === "critical_missing" ? "selected" : ""}>חסר מידע חוסם</option>
+          <option value="provisional" ${S.valueInfo === "provisional" ? "selected" : ""}>ניתוח ראשוני</option>
+          <option value="sufficient" ${S.valueInfo === "sufficient" ? "selected" : ""}>מספיק להערכה</option>
+        </select></label>
+        <button class="btn" type="submit">סנן</button>
+      </form>
+      <p class="hint">${data.total} שורות לפי הסינון. זו רשימת המלאי הקיימת, לא מלאי חדש.</p>
+      ${(data.items || []).map((item) => `
+        <button class="list-item" type="button" data-go-value="${esc(item.row_id)}">
+          <div class="ph"></div>
+          <div><b>${ltr(item.tag || "בלי תג")}</b> ${esc(item.description || "")}
+            <div class="hint">${esc(item.sheet_name)} · שורה ${esc(item.original_row)} · ${esc(item.family_label)}</div>
+            <div class="chips"><span class="chip">${esc(item.info_label)}</span><span class="chip">${esc(item.market_label)}</span></div>
+            <div class="hint">הצעד הבא: ${esc(item.next_action)}</div>
+            ${item.latest_range ? `<div class="hint">טווח אחרון: ${ltr(item.latest_range)} · ${esc(item.latest_date || "")}</div>` : ""}
+          </div>
+        </button>`).join("")}`;
+  }
+
+  function renderValueDetail() {
+    const subject = S.valueDetail;
+    if (!subject) return `<div class="card"><p>טוען את כרטיס השווי…</p></div>`;
+    const card = subject.card;
+    const facts = (subject.members || []).flatMap((member) => member.facts || []);
+    const photos = (subject.members || []).flatMap((member) => member.photos || []);
+    return `
+      <button class="btn-quiet" type="button" data-go="value">חזרה למוכנות</button>
+      <div class="warn">${esc(subject.research_limitation)}</div>
+      <p class="hint">${esc(subject.project_target_note)}</p>
+      <div class="card">
+        <h2>מה מוערך</h2>
+        <p><b>${ltr(subject.title)}</b></p>
+        <p>משפחה: ${esc(subject.family_label)} ${subject.subtype ? "· " + esc(subject.subtype) : ""}</p>
+        <p class="hint">${esc(subject.family_evidence)}</p>
+        <p>כמות מהקובץ: ${subject.quantity_text ? ltr(subject.quantity_text) : "לא צוינה"}</p>
+        <p><b>כלול:</b> ${esc(subject.included_text)}</p>
+        <p><b>לא כלול:</b> ${esc(subject.excluded_text)}</p>
+        <p class="hint">${esc(subject.double_count_note)}</p>
+        ${(subject.members || []).map((member) => `<p class="hint">${ltr(member.tag)} · ${esc(member.description)} · ${esc(member.sheet_name)} שורה ${esc(member.original_row)} · ${esc(member.source_file)}</p>`).join("")}
+        <form data-action="val-family">
+          <label>תיקון סיווג
+            <select name="family">
+              ${Object.entries(subject.labels.family).map(([id, label]) => `<option value="${id}" ${subject.family === id ? "selected" : ""}>${esc(label)}</option>`).join("")}
+            </select>
+          </label>
+          <button class="btn" type="submit">עדכן סיווג</button>
+        </form>
+      </div>
+      <div class="card">
+        <h2>כרטיס שווי</h2>
+        <p class="hint">${esc(card.appraisal_label)}</p>
+        <p><b>טווח:</b> ${ltr(card.range_label)}</p>
+        <p>מצב: ${esc(card.status === "unresolved" ? "לא הוכרע" : card.status === "provisional" ? "ראשוני" : card.status === "supported" ? "נתמך" : "נבדק על ידי מומחה")}</p>
+        <p>מידע: ${esc(card.info_label)} · שוק: ${esc(card.market_label)}</p>
+        ${card.confidence ? `<p>ביטחון: ${esc(card.confidence)} · ${esc(card.confidence_why)}</p>` : ""}
+        <p><b>שיטה:</b> ${esc(card.method)}</p>
+        <p class="hint">${esc(card.method_why)}</p>
+        <p class="hint">${esc(card.assumptions)}</p>
+        ${(card.sensitivities || []).slice(0, 8).map((line) => `<p class="hint">· ${esc(line)}</p>`).join("")}
+        <p class="hint">מצב: ${esc(card.basis.condition_status)} · הנחה: ${esc(card.basis.premise)} · שוק: ${esc(card.basis.market)} · מטבע: ${ltr(card.basis.currency)}</p>
+        <p class="hint">${esc(card.basis.price_boundary)}</p>
+        <p class="hint">${esc(card.basis.marketing_period)} · יעד ${ltr(card.basis.project_target)}</p>
+        <button class="btn" type="button" data-action="val-time">תרחיש נפרד ליעד 31.12.2026</button>
+      </div>
+      <div class="card facts">
+        <h2>כבר יש במקורות</h2>
+        <p class="hint">לא צריך להקליד שוב עובדה שמופיעה כאן.</p>
+        ${facts.map((fact) => `<div><b>${esc(fact.label)}:</b> ${ltr(fact.value)}<div class="hint">${esc(fact.source)}${fact.not_used ? " · " + esc(fact.not_used) : ""}</div></div>`).join("") || `<p class="hint">אין שדות מלאים.</p>`}
+        ${photos.map((photo) => `<img src="/api/photos/${esc(photo.id)}/thumb" alt="צילום מהסיור" style="width:96px;height:96px;object-fit:cover;border-radius:12px;margin:4px">`).join("")}
+      </div>
+      <form class="card" data-action="val-basis">
+        <h2>בסיס</h2>
+        <label>הנחת מכירה<select name="premise">
+          ${[["unset", "לא נבחרה"], ["continued_use", "המשך שימוש באתר"], ["relocation", "פירוק לשימוש חוזר"], ["parts", "חלקים"], ["scrap", "גרוטאות"]].map(([id, label]) => `<option value="${id}" ${subject.premise === id ? "selected" : ""}>${label}</option>`).join("")}
+        </select></label>
+        <label>מצב<select name="condition_status">
+          ${[["unknown", "לא ידוע"], ["reported", "דווח"], ["observed", "נצפה"], ["tested", "נבדק"]].map(([id, label]) => `<option value="${id}" ${subject.condition_status === id ? "selected" : ""}>${label}</option>`).join("")}
+        </select></label>
+        <label>מה ידוע על המצב<textarea name="condition_text">${esc(subject.condition_text || "")}</textarea></label>
+        <label>שוק גיאוגרפי<input name="market_text" value="${esc(subject.market_text || "")}" placeholder="רק אם ידוע. לא לנחש"></label>
+        <label>כלול<input name="included_text" value="${esc(subject.included_text || "")}"></label>
+        <label>לא כלול<input name="excluded_text" value="${esc(subject.excluded_text || "")}"></label>
+        <label>תזכורת בדיקה (רשות)<input name="review_due" value="${esc(subject.review_due || "")}" placeholder="2026-12-31"></label>
+        <button class="btn-primary" type="submit">שמור בסיס</button>
+      </form>
+      <div class="card check">
+        <h2>מה עוד צריך</h2>
+        ${(subject.requirements || []).map((item) => `
+          <div>
+            <b>${esc(item.question)}</b>
+            <div class="chips"><span class="chip">${esc(VAL_IMPACT[item.impact] || item.impact)}</span><span class="chip ${item.evidence_status === "supported" ? "ok" : "warn"}">${esc(VAL_STATUS[item.evidence_status] || item.evidence_status)}</span></div>
+            <p class="hint">${esc(item.why)}</p>
+            <p class="hint">איך: ${esc(item.how_to)} · תפקיד: ${esc(item.contact_role)} · ${item.site_presence === "site" ? "באתר" : item.site_presence === "remote" ? "מרחוק" : "באתר או מרחוק"}</p>
+            ${(item.evidence || []).map((bit) => `<p class="hint">מקור: ${ltr(bit.value)} · ${esc(bit.source)}</p>`).join("")}
+            ${item.answer_text ? `<p>${esc(item.answer_text)}</p>` : ""}
+            ${item.consequence ? `<p class="warn">${esc(item.consequence)}</p>` : ""}
+            ${item.evidence_status === "missing" || item.evidence_status === "conflict" ? `
+              <form data-action="val-answer" data-id="${esc(item.id)}">
+                <textarea name="text" placeholder="תשובה, או למה אי אפשר להשיג"></textarea>
+                <select name="status"><option value="supported">יש תשובה</option><option value="unable">לא ניתן להשיג</option><option value="conflict">סתירה</option><option value="not_applicable">לא רלוונטי</option></select>
+                <button class="btn" type="submit">שמור תשובה</button>
+              </form>
+              <label class="btn file-btn">צרף קובץ<input type="file" accept="image/*,.pdf" data-action="val-photo" data-id="${esc(item.id)}"></label>` : ""}
+          </div>`).join("")}
+        <form data-action="val-extra">
+          <h3>דרישה שעולה מהמחקר</h3>
+          <input name="question" placeholder="השאלה">
+          <input name="why" placeholder="למה זה משנה את השווי">
+          <input name="how" placeholder="איך עונים">
+          <button class="btn" type="submit">הוסף דרישה</button>
+        </form>
+      </div>
+      <form class="card" data-action="val-evidence">
+        <h2>ראיית שוק</h2>
+        <p class="hint">בלי מקור אין ראיה. הצעת קונה ומחיר יעד לא נכנסים לכאן.</p>
+        <label>כותרת<input name="title" required></label>
+        <label>כתובת או מסמך<input name="source_url" class="ltr" dir="ltr" placeholder="https://"></label>
+        <label>סוג מחיר<select name="price_type">
+          ${Object.entries(PRICE_TYPE).map(([id, label]) => `<option value="${id}">${label}</option>`).join("")}
+        </select></label>
+        <label>סכום<input name="price_amount" class="ltr" dir="ltr" inputmode="decimal"></label>
+        <label>מטבע<input name="currency" class="ltr" dir="ltr" placeholder="USD"></label>
+        <label>מס<select name="tax_treatment"><option value="unknown">לא צוין</option><option value="excluded_vat">ללא מע״מ</option><option value="included_vat">כולל מע״מ</option></select></label>
+        <label>מה כלול במחיר<select name="included_services"><option value="unknown">לא ידוע</option><option value="asset_only">נכס בלבד</option><option value="bundled">כולל הובלה או התקנה</option></select></label>
+        <label>הבדלים<input name="differences" placeholder="דגם, מצב, מיקום"></label>
+        <button class="btn-primary" type="submit">הוסף ראיה</button>
+        ${(subject.evidence || []).map((item) => `
+          <div class="hint">${ltr(item.title)} · ${esc(PRICE_TYPE[item.price_type] || item.price_type)} · ${item.price_amount != null ? ltr(item.price_amount + " " + (item.currency || "")) : "בלי סכום"} · ${item.role === "direct" ? "ישירה" : item.role === "excluded" ? "הוצאה" : "הקשר"}
+          ${item.duplicate_of ? " · כפילות, לא נספרת" : ""} ${item.limitations ? " · " + esc(item.limitations) : ""}</div>`).join("")}
+      </form>
+      <div class="card">
+        <h2>גרסאות</h2>
+        ${(subject.versions || []).map((item) => `<p>${item.scenario === "time_constrained" ? "תרחיש זמן" : "שיווק רגיל"} · ${ltr(item.range_label)} · ${esc(item.created_at)} ${item.outdated ? "· דורש בדיקה מחדש: " + esc(item.outdated_reason || "") : ""}</p>`).join("")}
+      </div>
+      <form class="card commercial" data-action="commercial">
+        <h2>מחוץ להערכת השווי</h2>
+        <p class="hint">הצעת קנייה ומחיר יעד נשמרים כאן בלבד. הם לא נכנסים לטווח ולא לכרטיס.</p>
+        <label>הצעת קנייה<input name="offer_text" autocomplete="off"></label>
+        <label>מחיר יעד<input name="target_text" autocomplete="off"></label>
+        <button class="btn" type="submit">שמור בנפרד</button>
+      </form>`;
+  }
+
+  function renderComparables() {
+    const data = S.comparables;
+    if (!data) return `<div class="card"><p>טוען ראיות…</p></div>`;
+    return `
+      <div class="warn">${esc(data.research_limitation)}</div>
+      ${(data.items || []).map((item) => `
+        <div class="card">
+          <b>${ltr(item.title)}</b>
+          <p>${esc(PRICE_TYPE[item.price_type] || item.price_type)} · ${item.price_amount != null ? ltr(String(item.price_amount) + " " + (item.currency || "")) : "בלי סכום"}</p>
+          <p class="hint">${item.counts_as_observation ? "נספרת כתצפית" : "לא נספרת כתצפית נוספת"} · ${esc(item.included_services || "")} · ${esc(item.tax_treatment || "")}</p>
+          <p class="hint">${ltr(item.source_url || item.source_document || "")}</p>
+          ${item.differences ? `<p>${esc(item.differences)}</p>` : ""}
+          ${item.limitations ? `<p class="hint">${esc(item.limitations)}</p>` : ""}
+          ${item.exclusion_reason ? `<p class="warn">${esc(item.exclusion_reason)}</p>` : ""}
+          ${item.role !== "excluded" ? `<button class="btn" type="button" data-action="val-exclude" data-id="${esc(item.id)}">הוצא מההשוואה</button>` : ""}
+        </div>`).join("") || `<p class="hint">עדיין אין ראיות. לא נוצר טווח.</p>`}`;
+  }
+
+  function renderVisitPrep() {
+    const data = S.visitPrep;
+    if (!data) return `<div class="card"><p>טוען את רשימת הסיור…</p></div>`;
+    return `
+      <div class="card"><h2>מה לאסוף בסיור</h2><p class="hint">${esc(data.note)}</p></div>
+      ${(data.groups || []).map((group) => `
+        <div class="card"><h3>${esc(group.label)}</h3>
+          ${group.tasks.map((task) => `<p><b>${esc(task.question)}</b><br><span class="hint">${esc(task.why)} · ${esc(task.how)} · ${esc(task.where)}</span></p>`).join("")}
+        </div>`).join("") || `<p class="hint">עוד אין שאלות. פותחים כרטיס שווי, והחסר המהותי מופיע כאן.</p>`}`;
+  }
+
   function render() {
     if (!S.authed) {
       $(`<form class="card login" data-action="login"><h1>סיור ציוד</h1><p class="hint">כניסה מקומית לפני הסיור.</p>${S.error ? `<div class="error">${esc(S.error)}</div>` : ""}<label>סיסמה<input type="password" name="password" autocomplete="current-password"></label><button class="btn-primary" type="submit">כניסה</button></form>`);
@@ -911,6 +1157,10 @@
     else if (S.screen === "visit") body = renderVisit();
     else if (S.screen === "ready") body = renderReady();
     else if (S.screen === "import") body = renderImport();
+    else if (S.screen === "value") body = renderValue();
+    else if (S.screen === "value-detail") body = renderValueDetail();
+    else if (S.screen === "comparables") body = renderComparables();
+    else if (S.screen === "visit-prep") body = renderVisitPrep();
     $(shell(body));
   }
 
@@ -920,6 +1170,9 @@
     location.hash = "#/" + screen;
     if (screen === "import" && !S.importPreview) loadImport();
     if (screen === "ready") runReady();
+    if (screen === "value") loadValue();
+    if (screen === "comparables") loadComparables();
+    if (screen === "visit-prep") loadVisitPrep();
     render();
   }
 
@@ -957,6 +1210,11 @@
       S.screen = "row";
       location.hash = "#/row/" + target.dataset.goRow;
       render();
+      return;
+    }
+    if (target.dataset.goValue) {
+      S.screen = "value-detail";
+      location.hash = "#/value/row/" + target.dataset.goValue;
       return;
     }
     const action = target.dataset.action;
@@ -1085,6 +1343,25 @@
       }
     }
     if (action === "run-ready") runReady();
+    if (action === "val-time" && S.valueDetail) {
+      const response = await fetch(`/api/valuation/subjects/${S.valueDetail.id}/time-scenario`, { method: "POST", credentials: "include" });
+      if (response.ok) S.valueDetail = await response.json();
+      render();
+    }
+    if (action === "val-exclude") {
+      const reason = window.prompt("למה הראיה יוצאת מההשוואה?") || "";
+      if (reason.trim().length < 2) return;
+      const response = await fetch(`/api/valuation/evidence/${target.dataset.id}`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ role: "excluded", exclusion_reason: reason }),
+      });
+      if (response.ok) {
+        S.valueDetail = await response.json();
+        await loadComparables();
+      }
+    }
   });
 
   document.getElementById("app").addEventListener("change", async (event) => {
@@ -1139,6 +1416,14 @@
     }
     if (target.dataset.action === "area-filter") {
       S.areaFilter = target.value;
+      render();
+    }
+    if (target.dataset.action === "val-photo") {
+      const form = new FormData();
+      form.append("file", target.files[0]);
+      const response = await fetch(`/api/valuation/requirements/${target.dataset.id}/photo`, { method: "POST", body: form, credentials: "include" });
+      const result = await response.json().catch(() => ({}));
+      S.error = result.message || result.detail || "";
       render();
     }
     if (target.dataset.action === "review-photo") {
@@ -1233,6 +1518,73 @@
       }
       render();
     }
+    if (form.dataset.action === "value-filter") {
+      const data = new FormData(form);
+      S.valueQuery = data.get("q") || "";
+      S.valueFamily = data.get("family") || "";
+      S.valueInfo = data.get("info") || "";
+      await loadValue();
+    }
+    if (form.dataset.action === "val-basis" || form.dataset.action === "val-family") {
+      const data = new FormData(form);
+      const body = { updated_at: S.valueDetail.updated_at };
+      if (form.dataset.action === "val-family") body.family = data.get("family");
+      else data.forEach((value, key) => { body[key] = value; });
+      const response = await fetch(`/api/valuation/subjects/${S.valueDetail.id}/basis`, {
+        method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) S.error = result.detail || "הבסיס לא נשמר.";
+      else { S.error = ""; S.valueDetail = result; }
+      render();
+    }
+    if (form.dataset.action === "val-answer") {
+      const data = new FormData(form);
+      const response = await fetch(`/api/valuation/requirements/${form.dataset.id}/answer`, {
+        method: "POST", credentials: "include", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: data.get("status"), text: data.get("text") }),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) S.error = result.detail || "התשובה לא נשמרה.";
+      else { S.error = ""; S.valueDetail = result; await refreshFromServer().catch(() => {}); }
+      render();
+    }
+    if (form.dataset.action === "val-extra") {
+      const data = new FormData(form);
+      const response = await fetch(`/api/valuation/subjects/${S.valueDetail.id}/requirements`, {
+        method: "POST", credentials: "include", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question: data.get("question"), why: data.get("why"), how: data.get("how"), impact: "material" }),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) S.error = result.detail || "הדרישה לא נוספה.";
+      else { S.error = ""; S.valueDetail = result; }
+      render();
+    }
+    if (form.dataset.action === "val-evidence") {
+      const data = new FormData(form);
+      const payload = {};
+      data.forEach((value, key) => { payload[key] = value; });
+      const response = await fetch(`/api/valuation/subjects/${S.valueDetail.id}/evidence`, {
+        method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) S.error = result.detail || "הראיה לא נשמרה.";
+      else { S.error = ""; S.valueDetail = result; }
+      render();
+    }
+    if (form.dataset.action === "commercial") {
+      const data = new FormData(form);
+      const rowId = S.valueDetail.row_id || (S.valueDetail.members[0] && S.valueDetail.members[0].row_id);
+      const response = await fetch(`/api/commercial/${rowId}`, {
+        method: "POST", credentials: "include", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ offer_text: data.get("offer_text"), target_text: data.get("target_text") }),
+      });
+      const result = await response.json().catch(() => ({}));
+      S.toast = response.ok ? result.separated : (result.detail || "לא נשמר.");
+      const again = await fetch(`/api/valuation/subjects/${S.valueDetail.id}`, { credentials: "include" });
+      if (again.ok) S.valueDetail = await again.json();
+      render();
+    }
     if (form.dataset.action === "upload-plant") {
       const data = new FormData(form);
       const upload = new FormData();
@@ -1258,7 +1610,15 @@
     else if (hash.startsWith("#/visit")) S.screen = "visit";
     else if (hash.startsWith("#/ready")) S.screen = "ready";
     else if (hash.startsWith("#/import")) S.screen = "import";
+    else if (hash.startsWith("#/value/row/")) S.screen = "value-detail";
+    else if (hash.startsWith("#/value")) S.screen = "value";
+    else if (hash.startsWith("#/comparables")) S.screen = "comparables";
+    else if (hash.startsWith("#/visit-prep")) S.screen = "visit-prep";
     else S.screen = "capture";
+    if (S.screen === "value") loadValue();
+    if (S.screen === "value-detail") loadValueDetail(hash.split("/")[3]);
+    if (S.screen === "comparables") loadComparables();
+    if (S.screen === "visit-prep") loadVisitPrep();
     render();
   });
   window.addEventListener("online", () => { S.online = true; syncAll(); });

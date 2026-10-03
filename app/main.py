@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
-from app import importer, logic
+from app import importer, logic, valuation
 from app.db import connect, init_db
 from app.matching import match_inventory
 from app.settings import get_settings
@@ -552,6 +552,140 @@ def create_app() -> FastAPI:
         target = settings.root / "data" / "exports" / "survey-package.zip"
         logic.export_package(conn, target)
         return FileResponse(target, filename="survey-package.zip", media_type="application/zip")
+
+    @app.get("/api/valuation/overview")
+    def valuation_overview(request: Request, conn=Depends(get_conn), area: str = "", family: str = "", info: str = "", q: str = "", limit: int = 40, offset: int = 0):
+        require_user(request)
+        return valuation.overview(conn, area=area, family=family, info=info, q=q, limit=min(limit, 80), offset=offset)
+
+    @app.get("/api/valuation/visit-prep")
+    def valuation_visit_prep(request: Request, conn=Depends(get_conn)):
+        require_user(request)
+        return valuation.visit_preparation(conn)
+
+    @app.get("/api/valuation/comparables")
+    def valuation_comparables(request: Request, conn=Depends(get_conn), subject_id: str = ""):
+        require_user(request)
+        return valuation.comparables(conn, subject_id or None)
+
+    @app.post("/api/valuation/subjects")
+    def valuation_open(request: Request, body: dict, conn=Depends(get_conn)):
+        require_user(request)
+        try:
+            return valuation.ensure_row_subject(conn, body.get("row_id") or "", logic.now_iso())
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/api/valuation/subjects/{subject_id}")
+    def valuation_subject(subject_id: str, request: Request, conn=Depends(get_conn)):
+        require_user(request)
+        try:
+            return valuation.subject_payload(conn, subject_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/api/valuation/groups")
+    def valuation_group(request: Request, body: dict, conn=Depends(get_conn)):
+        require_user(request)
+        try:
+            return valuation.create_group(conn, body.get("row_ids") or [], body.get("title") or "", logic.now_iso())
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/valuation/subjects/{subject_id}/basis")
+    def valuation_basis(subject_id: str, request: Request, body: dict, conn=Depends(get_conn)):
+        require_user(request)
+        try:
+            return valuation.update_basis(conn, subject_id, body, logic.now_iso())
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/valuation/subjects/{subject_id}/requirements")
+    def valuation_add_requirement(subject_id: str, request: Request, body: dict, conn=Depends(get_conn)):
+        require_user(request)
+        try:
+            return valuation.add_requirement(conn, subject_id, body, logic.now_iso())
+        except (LookupError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/valuation/requirements/{requirement_id}/answer")
+    def valuation_answer(requirement_id: str, request: Request, body: dict, conn=Depends(get_conn)):
+        require_user(request)
+        try:
+            return valuation.answer_requirement(conn, requirement_id, body, logic.now_iso())
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/valuation/requirements/{requirement_id}/photo")
+    async def valuation_photo(requirement_id: str, request: Request, conn=Depends(get_conn), file: UploadFile = File(...)):
+        require_user(request)
+        data = await file.read()
+        settings = get_settings()
+        try:
+            return valuation.save_requirement_file(
+                conn, requirement_id, data, file.filename or "photo.jpg", settings.photo_dir, settings.thumb_dir, logic.now_iso()
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail="הקובץ לא נשמר, והדרישה לא סומנה כמוכחת.") from exc
+
+    @app.post("/api/valuation/subjects/{subject_id}/evidence")
+    def valuation_evidence(subject_id: str, request: Request, body: dict, conn=Depends(get_conn)):
+        require_user(request)
+        try:
+            return valuation.add_evidence(conn, subject_id, body, logic.now_iso())
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/valuation/evidence/{evidence_id}")
+    def valuation_evidence_update(evidence_id: str, request: Request, body: dict, conn=Depends(get_conn)):
+        require_user(request)
+        try:
+            return valuation.update_evidence(conn, evidence_id, body, logic.now_iso())
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/valuation/subjects/{subject_id}/time-scenario")
+    def valuation_time(subject_id: str, request: Request, conn=Depends(get_conn)):
+        require_user(request)
+        try:
+            return valuation.add_time_scenario(conn, subject_id, logic.now_iso())
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/api/valuation/subjects/{subject_id}/specialist")
+    def valuation_specialist(subject_id: str, request: Request, body: dict, conn=Depends(get_conn)):
+        require_user(request)
+        try:
+            return valuation.record_specialist(conn, subject_id, body, logic.now_iso())
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/commercial/{row_id}")
+    def commercial_get(row_id: str, request: Request, conn=Depends(get_conn)):
+        require_user(request)
+        return valuation.commercial_payload(conn, row_id)
+
+    @app.post("/api/commercial/{row_id}")
+    def commercial_save(row_id: str, request: Request, body: dict, conn=Depends(get_conn)):
+        require_user(request)
+        try:
+            return valuation.save_commercial(conn, row_id, body, logic.now_iso())
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     return app
 
