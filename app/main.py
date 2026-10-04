@@ -326,6 +326,72 @@ def create_app() -> FastAPI:
         require_user(request)
         return logic.confirm_capture(conn, capture_id, body.get("photo_ids") or [], logic.now_iso())
 
+    @app.post("/api/tour-files")
+    async def tour_files(request: Request, conn=Depends(get_conn)):
+        require_user(request)
+        form = await request.form()
+        uploads = [item for item in form.getlist("files") if hasattr(item, "read")]
+        if not uploads:
+            raise HTTPException(status_code=400, detail="לא נבחרו קבצים.")
+        file_ids = []
+        for item in form.getlist("file_ids"):
+            text = str(item or "")
+            if text.startswith("["):
+                try:
+                    file_ids.extend(str(part) for part in json.loads(text))
+                except json.JSONDecodeError:
+                    file_ids.append(text)
+            elif text:
+                file_ids.append(text)
+        # Area is intentionally unread. A dropped group does not take the on-screen area.
+        capture_id = str(form.get("capture_id") or "")
+        allow_open = len(uploads) == 1
+        settings = get_settings()
+        created = logic.now_iso()
+        results = []
+        for index, upload in enumerate(uploads):
+            data = await upload.read()
+            file_id = file_ids[index] if index < len(file_ids) and file_ids[index] else str(__import__("uuid").uuid4())
+            name = getattr(upload, "filename", None) or "file"
+            if len(data) > 25 * 1024 * 1024:
+                results.append(
+                    {
+                        "file_id": file_id,
+                        "original_name": name,
+                        "saved": False,
+                        "filed": False,
+                        "rows": [],
+                        "message": "הקובץ גדול מדי ולא נשמר בשרת.",
+                    }
+                )
+                continue
+            try:
+                results.append(
+                    logic.file_tour_upload(
+                        conn,
+                        file_id=file_id,
+                        original_name=name,
+                        data=data,
+                        capture_id=capture_id,
+                        allow_open_capture=allow_open,
+                        photo_dir=settings.photo_dir,
+                        thumb_dir=settings.thumb_dir,
+                        created_at=created,
+                    )
+                )
+            except Exception:
+                results.append(
+                    {
+                        "file_id": file_id,
+                        "original_name": name,
+                        "saved": False,
+                        "filed": False,
+                        "rows": [],
+                        "message": "הקובץ לא נשמר בשרת.",
+                    }
+                )
+        return {"results": results, "area_required": False}
+
     @app.post("/api/captures/{capture_id}/split")
     def split(capture_id: str, request: Request, body: dict, conn=Depends(get_conn)):
         require_user(request)

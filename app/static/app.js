@@ -38,6 +38,8 @@
     valueInfo: "",
     comparables: null,
     visitPrep: null,
+    tourResults: [],
+    tourBusy: false,
   };
 
   const STATUS_HE = {
@@ -174,6 +176,7 @@
         if (event.data && event.data.type === "sync") syncAll();
       });
     }
+    if (S.authed && navigator.onLine) await flushTourQueue();
     render();
   }
 
@@ -427,6 +430,7 @@
     }
     S.syncing = true;
     try {
+      await flushTourQueue();
       const captures = await Store.all("captures");
       for (const cap of captures) {
         if (cap.id === "self-test") continue;
@@ -452,7 +456,7 @@
           cap.links = (body.links || []).map(normLink);
           cap.sync_status = "pending_sync";
         }
-        const photos = (await Store.all("photos")).filter((photo) => photo.captureId === cap.id);
+        const photos = (await Store.all("photos")).filter((photo) => photo.captureId === cap.id && !photo.tourPending);
         let failed = false;
         for (const photo of photos) {
           if (photo.state === "synced" && !photo.dirty) continue;
@@ -562,7 +566,7 @@
             <label for="current-area">האזור עכשיו</label>
             <select id="current-area" data-action="current-area">${areaOptions}</select>
           </div>
-          <p class="hint">האזור כאן חל על קליטה חדשה. הוא לא מזיז קליטות שכבר צולמו.</p>
+          <p class="hint">האזור כאן חל על קליטה חדשה של פריט אחד. הוא לא מזיז קליטות שכבר צולמו, ולא חל על גרירת קבוצת קבצים.</p>
           ${S.error ? `<div class="error">${esc(S.error)}</div>` : ""}
           ${S.toast ? `<div class="ok">${esc(S.toast)}</div>` : ""}
         </div>
@@ -577,28 +581,221 @@
       </nav>`;
   }
 
+  function tourAreaLine(item) {
+    if (item.area_source === "file" && item.observed_area) return `האזור נלקח מהקובץ: ${item.observed_area}`;
+    if (item.area_source === "existing_capture") return `האזור נלקח מהקליטה שכבר פתוחה: ${item.observed_area || "לא ידוע"}`;
+    const listed = [...new Set((item.rows || []).map((row) => row.listed_area).filter(Boolean))];
+    if (listed.length) return `אזור שנצפה: לא ידוע. האזור שכבר רשום בשורה: ${listed.join(", ")}`;
+    return "אזור: לא ידוע";
+  }
+
+  function tourResultHtml(item) {
+    const rows = item.filed ? (item.rows || []) : [];
+    const where = rows.map((row) => `${ltr(row.tag)} ${esc(row.description)} · גיליון ${ltr(row.sheet_name)} שורה ${esc(row.original_row)}`).join("<br>");
+    const state = item.saved ? "נשמר בשרת" : "לא נשמר בשרת";
+    return `
+      <div class="tour-file" data-tour-file="${esc(item.file_id || item.original_name || "")}" data-saved="${item.saved ? "yes" : "no"}" data-filed="${item.filed ? "yes" : "no"}">
+        <b>${ltr(item.original_name || "קובץ")}</b>
+        <div class="${item.saved ? "ok" : "error"}">${esc(state)}</div>
+        ${item.filed ? `<div>תויק אל ${where}</div>` : (item.saved ? `<div class="warn">אין התאמה ברורה. הקובץ בתור הבדיקה, בלי ניחוש.</div>` : "")}
+        <div class="hint">${esc(tourAreaLine(item))}</div>
+        ${item.saved ? "" : `<div class="hint">${esc(item.message || "הקובץ לא נשמר בשרת.")}</div>`}
+      </div>`;
+  }
+
+  function tourPanel() {
+    const shown = new Set((S.tourResults || []).map((item) => item.file_id));
+    const pending = Object.values(S.photos).filter((photo) => photo.tourPending && photo.state !== "synced" && !shown.has(photo.id));
+    const pendingHtml = pending.map((photo) => tourResultHtml({
+      file_id: photo.id,
+      original_name: photo.name,
+      saved: false,
+      filed: false,
+      rows: [],
+      area_source: "unknown",
+      message: "אין חיבור, או שההעלאה נכשלה. הקובץ לא נשמר בשרת.",
+    })).join("");
+    const results = (S.tourResults || []).map(tourResultHtml).join("");
+    return `
+      <div class="drop-zone" data-drop-zone="tour">
+        <h2>קבצים מהסיור</h2>
+        <p>גררו לכאן קבוצת תמונות ומסמכים, או בחרו כמה קבצים יחד. בלי תיקייה, בלי שינוי שם, ובלי להקליד מזהה.</p>
+        <p class="hint">אין צורך לבחור אזור. הוא נשאר לא ידוע, אלא אם הקובץ או רשומה שכבר קיימת מציינים אותו. התאמה ברורה מתויקת לשורה. אם היא לא ברורה, הקובץ נשמר בשרת ונכנס לתור הבדיקה.</p>
+        <label class="btn file-btn">בחירת קבצים<input type="file" data-action="tour-files" multiple accept="image/*,.pdf,.doc,.docx,.txt,.csv,.xls,.xlsx,.rtf,.heic,.tif,.tiff"></label>
+        ${S.tourBusy ? `<p>מעלה את הקבצים לשרת…</p>` : ""}
+        ${pendingHtml}
+        ${results}
+      </div>`;
+  }
+
+  function openCaptureIsClear() {
+    const cap = S.captures[S.openCaptureId];
+    if (!cap) return false;
+    const confirmed = (cap.links || []).filter((link) => link.review_status === "auto_linked" || link.review_status === "user_confirmed");
+    if (confirmed.length === 1) return true;
+    const groups = new Set(confirmed.map((link) => (S.rowById[link.row_id] || {}).duplicate_group || ""));
+    return confirmed.length > 1 && groups.size === 1 && Boolean([...groups][0]);
+  }
+
+  async function filesFromList(fileList) {
+    return [...fileList].filter((file) => file && typeof file.name === "string");
+  }
+
+  async function filesFromDrop(dataTransfer) {
+    const items = [...(dataTransfer.items || [])];
+    const collected = [];
+    async function readAll(reader) {
+      const all = [];
+      while (true) {
+        const batch = await new Promise((resolve, reject) => reader.readEntries(resolve, reject));
+        if (!batch.length) return all;
+        all.push(...batch);
+      }
+    }
+    async function walk(entry) {
+      if (!entry) return;
+      if (entry.isFile) {
+        const file = await new Promise((resolve, reject) => entry.file(resolve, reject));
+        if (file) collected.push(file);
+      } else if (entry.isDirectory) {
+        const entries = await readAll(entry.createReader());
+        for (const child of entries) await walk(child);
+      }
+    }
+    if (items.length && items.some((item) => item.webkitGetAsEntry)) {
+      for (const item of items) {
+        const entry = item.webkitGetAsEntry && item.webkitGetAsEntry();
+        if (entry) await walk(entry);
+        else if (item.getAsFile && item.getAsFile()) collected.push(item.getAsFile());
+      }
+    }
+    if (collected.length) return collected;
+    return filesFromList(dataTransfer.files || []);
+  }
+
+  async function flushTourQueue() {
+    if (!navigator.onLine || S.tourBusy) return;
+    const pending = Object.values(S.photos).filter((photo) => photo.tourPending && photo.blob);
+    if (!pending.length) return;
+    const files = pending.map((photo) => {
+      if (photo.blob.name) return photo.blob;
+      return new File([photo.blob], photo.name || "file", { type: photo.blob.type || "" });
+    });
+    await uploadTourFiles(files, pending.map((photo) => photo.id), { fromQueue: true });
+  }
+
+  async function uploadTourFiles(fileList, ids, options) {
+    const files = await filesFromList(fileList);
+    if (!files.length || S.tourBusy) return;
+    const ownIds = ids && ids.length === files.length ? ids : files.map(() => crypto.randomUUID());
+    const singleClear = files.length === 1 && openCaptureIsClear();
+    if (!navigator.onLine) {
+      for (let index = 0; index < files.length; index += 1) {
+        const photo = {
+          id: ownIds[index],
+          tourPending: true,
+          name: files[index].name || "file",
+          blob: files[index],
+          state: "failed",
+          created_at: nowIso(),
+        };
+        const saved = await Store.savePhoto(photo);
+        if (saved.ok) {
+          photo.state = "failed";
+          photo.tourPending = true;
+          await Store.put("photos", photo);
+          S.photos[photo.id] = photo;
+        }
+      }
+      S.error = "אין חיבור. הקבצים לא נשמרו בשרת.";
+      render();
+      return;
+    }
+    S.tourBusy = true;
+    S.error = "";
+    render();
+    try {
+      const form = new FormData();
+      files.forEach((file, index) => {
+        form.append("files", file, file.name || "file");
+        form.append("file_ids", ownIds[index]);
+      });
+      if (singleClear) form.append("capture_id", S.openCaptureId);
+      const response = await fetch("/api/tour-files", { method: "POST", body: form, credentials: "include" });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        S.error = body.detail || "הקבצים לא נשמרו בשרת.";
+        S.tourResults = files.map((file, index) => ({
+          file_id: ownIds[index],
+          original_name: file.name,
+          saved: false,
+          filed: false,
+          rows: [],
+          area_source: "unknown",
+          message: "לא נשמר בשרת.",
+        }));
+      } else {
+        S.tourResults = body.results || [];
+        S.toast = "ההעלאה הסתיימה. כל קובץ שנשמר נמצא בשרת.";
+        for (const item of S.tourResults) {
+          if (item.saved && S.photos[item.file_id] && S.photos[item.file_id].tourPending) {
+            delete S.photos[item.file_id];
+            await Store.remove("photos", item.file_id);
+          }
+        }
+        await refreshFromServer();
+      }
+    } catch (error) {
+      S.error = "הקבצים לא נשמרו בשרת.";
+      S.tourResults = files.map((file, index) => ({
+        file_id: ownIds[index],
+        original_name: file.name,
+        saved: false,
+        filed: false,
+        rows: [],
+        area_source: "unknown",
+        message: "לא נשמר בשרת.",
+      }));
+    } finally {
+      S.tourBusy = false;
+      if (location.hash && location.hash !== "#/capture" && location.hash !== "#/") {
+        location.hash = "#/capture";
+      } else {
+        S.screen = "capture";
+        render();
+      }
+    }
+    if (options && options.fromQueue) return;
+  }
+
   function renderCapture() {
     const cap = S.captures[S.openCaptureId];
     if (!cap) {
       const recent = Object.values(S.captures).sort((a, b) => String(b.created_at).localeCompare(String(a.created_at))).slice(0, 3);
       return `
+        ${tourPanel()}
         <div class="card">
           <h2>קליטת ציוד</h2>
-          <p class="hint">בוחרים אזור, מצלמים את הציוד ואת התג, רושמים הערה קצרה, ועוברים לפריט הבא.</p>
+          <p class="hint">אפשר לגרור קבוצת קבצים בלי לבחור אזור. לקליטה של פריט אחד: בוחרים אזור, מצלמים את הציוד ואת התג, ועוברים לפריט הבא.</p>
           <button class="btn-primary" type="button" data-action="new-capture">ציוד חדש</button>
         </div>
         ${recent.map(miniCapture).join("")}
         <p class="hint"><a href="#/ready">בדיקת מוכנות לפני הסיור</a> · <a href="#/import">קבצי המלאי</a></p>`;
     }
     const photos = photosOf(cap.id);
-    const thumbs = photos.map((photo) => `
+    const thumbs = photos.map((photo) => {
+      const name = photo.name || photo.original_name || "";
+      const isDoc = photo.role === "document" || /\.(pdf|docx?|txt|csv|xlsx?|rtf)$/i.test(name);
+      const preview = isDoc ? `<div class="ph">${ltr(name || "מסמך")}</div>` : `<img src="${esc(photo.url || `/api/photos/${photo.id}/thumb`)}" alt="צילום">`;
+      return `
       <div class="thumb">
-        <img src="${esc(photo.url || `/api/photos/${photo.id}/thumb`)}" alt="צילום">
+        ${preview}
         <select data-action="role" data-photo="${esc(photo.id)}">
-          ${["", "overall", "tag", "nameplate", "accessories", "location", "system"].map((role) => `<option value="${role}" ${photo.role === role ? "selected" : ""}>${esc(roleLabel(role))}</option>`).join("")}
+          ${["", "overall", "tag", "nameplate", "accessories", "location", "system", "document"].map((role) => `<option value="${role}" ${photo.role === role ? "selected" : ""}>${esc(roleLabel(role))}</option>`).join("")}
         </select>
         <div class="hint">${esc(STATUS_HE[photo.state] || photo.upload_state || "")}</div>
-      </div>`).join("");
+      </div>`;
+    }).join("");
     const suggestions = (cap.suggestions || []).map((item) => `
       <label class="suggest">
         <input type="checkbox" data-action="pick-row" data-row="${esc(item.row_id)}" ${((cap.links || []).some((link) => link.row_id === item.row_id)) ? "checked" : ""}>
@@ -613,6 +810,7 @@
         <div class="hint">${esc(row.sheet_name)} שורה ${esc(row.original_row)} · ${ltr(row.listed_area || "לא ידוע")}</div>
       </label>`).join("");
     return `
+      ${tourPanel()}
       <div class="card" data-capture="${esc(cap.id)}">
         <h2>קליטה <span class="ltr">${esc(cap.id.slice(0, 8))}</span></h2>
         <p><b>אזור הקליטה הזו:</b> ${ltr(cap.observed_area_name || "לא ידוע")}</p>
@@ -662,7 +860,7 @@
   }
 
   function roleLabel(role) {
-    return { "": "בלי תפקיד", overall: "מבט כללי", tag: "תג זיהוי", nameplate: "שלט יצרן", accessories: "אביזר", location: "מיקום כללי", system: "מבט מערכת" }[role] || role;
+    return { "": "בלי תפקיד", overall: "מבט כללי", tag: "תג זיהוי", nameplate: "שלט יצרן", accessories: "אביזר", location: "מיקום כללי", system: "מבט מערכת", document: "מסמך" }[role] || role;
   }
   function ocrChips(cap) {
     const lines = String(cap.raw_ocr || "").split(/\n/).map((line) => line.trim()).filter(Boolean).slice(0, 6);
@@ -1408,6 +1606,10 @@
       await addFiles(cap, target.files);
       target.value = "";
     }
+    if (target.dataset.action === "tour-files") {
+      await uploadTourFiles(target.files);
+      target.value = "";
+    }
     if (target.dataset.action === "role") {
       const photo = S.photos[target.dataset.photo];
       if (!photo) return;
@@ -1645,6 +1847,37 @@
     if (S.screen === "visit-prep") loadVisitPrep();
     render();
   });
+  let dragDepth = 0;
+  function dragHasFiles(event) {
+    const types = event.dataTransfer && event.dataTransfer.types;
+    return Boolean(types && [...types].includes("Files"));
+  }
+  document.addEventListener("dragenter", (event) => {
+    if (!S.authed || !dragHasFiles(event)) return;
+    dragDepth += 1;
+    document.body.classList.add("dropping");
+    event.preventDefault();
+  });
+  document.addEventListener("dragover", (event) => {
+    if (!S.authed || !dragHasFiles(event)) return;
+    event.preventDefault();
+  });
+  document.addEventListener("dragleave", () => {
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (!dragDepth) document.body.classList.remove("dropping");
+  });
+  document.addEventListener("drop", async (event) => {
+    dragDepth = 0;
+    document.body.classList.remove("dropping");
+    if (!S.authed || !event.dataTransfer) return;
+    const onPicker = event.target && event.target.closest && event.target.closest("input[type=file]");
+    if (onPicker) return;
+    event.preventDefault();
+    const files = await filesFromDrop(event.dataTransfer);
+    if (!files.length) return;
+    await uploadTourFiles(files);
+  });
+
   window.addEventListener("online", () => { S.online = true; syncAll(); });
   window.addEventListener("offline", () => { S.online = false; render(); });
   document.addEventListener("visibilitychange", () => {

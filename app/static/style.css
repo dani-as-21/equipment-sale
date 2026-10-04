@@ -62,6 +62,30 @@ textarea { min-height: 72px; resize: vertical; }
 .btn-bad { color: var(--bad); border-color: #e3b6b6; }
 .file-btn { position: relative; overflow: hidden; display: inline-flex; align-items: center; }
 .file-btn input { position: absolute; inset: 0; opacity: 0; }
+.drop-zone {
+  border: 2px dashed var(--accent);
+  border-radius: 16px;
+  padding: 16px;
+  margin: 10px 0;
+  background: var(--surface);
+  min-height: 148px;
+}
+.drop-zone h2 { margin: 0 0 8px; font-size: 1.05rem; }
+body.dropping::before {
+  content: "שחררו את הקבצים. אין צורך לבחור אזור.";
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 24px;
+  background: rgba(15, 92, 80, 0.92);
+  color: white;
+  font-size: 1.35rem;
+}
+.tour-file { padding: 8px 0; border-bottom: 1px solid var(--line); }
 
 .thumbs { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; }
 .thumb { width: 112px; flex: 0 0 auto; }

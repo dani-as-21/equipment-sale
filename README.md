@@ -57,6 +57,12 @@ python3 -m pytest tests -q
 5. Tap **שמור ועבור לפריט הבא**.
 6. Use **מלאי** to open a row, **בדיקה** for open questions, and **סיכום** for counts and the export.
 
+## Tour files
+
+On **קליטה**, drop a group of photos and documents onto the screen, or choose several files together. There is no folder picker, no rename step, and no need to type an asset id. The area selector is not used for that upload: the observed area stays unknown unless the file itself names an area (for example `אזור: 07`) or the file is the single file attached to a capture that is already clearly linked.
+
+A clear tag or nameplate text files the copy onto that inventory row. The same tag on different rows, a generic name, or text with no identifier stays in the review queue. The file is written on the server before it is shown as saved, including which row it was filed to. A copy that exists only on the phone is not shown as saved.
+
 Automatic linking happens only for an exact unique tag or serial, or for an identical same-area duplicate group, and only when the observed area does not conflict with the listed area. Similar names, models, and partial tags are suggestions. Unknown location is allowed.
 
 ## Valuation readiness

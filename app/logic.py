@@ -5,9 +5,11 @@ from __future__ import annotations
 import csv
 import io
 import json
+import os
 import re
 import shutil
 import sqlite3
+import tempfile
 import uuid
 import zipfile
 from datetime import datetime, timezone
@@ -15,11 +17,17 @@ from pathlib import Path
 
 from PIL import Image, UnidentifiedImageError
 
-from app.matching import match_inventory
+from app.matching import area_conflict, match_inventory, norm_area, norm_id
 
 ID_RE = re.compile(r"^[0-9a-fA-F-]{36}$")
-ITEM_ROLES = {"", "overall", "tag", "nameplate", "accessories"}
+ITEM_ROLES = {"", "overall", "tag", "nameplate", "accessories", "document"}
 GENERAL_ROLES = {"location", "system"}
+IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".heic", ".heif", ".tif", ".tiff", ".bmp"}
+DOCUMENT_SUFFIXES = {".pdf", ".doc", ".docx", ".txt", ".csv", ".xls", ".xlsx", ".rtf"}
+AREA_LABEL_RE = re.compile(
+    r"(?<![\w])(?:אזור|area|location)\s*[:：\-]?\s*([^\n\r,;|]{1,60})",
+    re.IGNORECASE,
+)
 ACTOR_USER = "מנהלת הפרויקט"
 ACTOR_SYSTEM = "מערכת"
 
@@ -485,6 +493,30 @@ def apply_capture(conn: sqlite3.Connection, body: dict, created_at: str | None =
     return {"capture": stored, "links": capture_links(conn, capture_id), "kept": "client"}
 
 
+def sniff_image_suffix(data: bytes) -> str:
+    try:
+        with Image.open(io.BytesIO(data)) as image:
+            fmt = (image.format or "").lower()
+    except (UnidentifiedImageError, OSError):
+        return ""
+    return {"jpeg": ".jpg", "png": ".png", "webp": ".webp", "gif": ".gif", "tiff": ".tif", "bmp": ".bmp"}.get(fmt, "")
+
+
+def stored_suffix(original_name: str, data: bytes) -> str:
+    suffix = Path(original_name or "").suffix.lower()
+    if suffix in IMAGE_SUFFIXES or suffix in DOCUMENT_SUFFIXES:
+        return suffix
+    sniffed = sniff_image_suffix(data)
+    return sniffed or ".jpg"
+
+
+def tour_type_allowed(original_name: str, data: bytes) -> bool:
+    suffix = Path(original_name or "").suffix.lower()
+    if suffix in IMAGE_SUFFIXES or suffix in DOCUMENT_SUFFIXES:
+        return True
+    return bool(sniff_image_suffix(data))
+
+
 def save_photo_file(
     conn: sqlite3.Connection,
     *,
@@ -514,9 +546,7 @@ def save_photo_file(
             """,
             (capture_id, current["id"] if current else None, created_at, created_at),
         )
-    suffix = Path(original_name or "photo.jpg").suffix.lower()
-    if suffix not in {".jpg", ".jpeg", ".png", ".webp", ".gif", ".heic", ".heif"}:
-        suffix = ".jpg"
+    suffix = stored_suffix(original_name, data)
     target = photo_dir / f"{photo_id}{suffix}"
     target.write_bytes(data)
     if not target.exists() or target.stat().st_size != len(data):
@@ -596,6 +626,485 @@ def confirm_capture(conn: sqlite3.Connection, capture_id: str, photo_ids: list[s
             (capture_id, *photo_ids),
         )
     return {"synced": True, "missing": []}
+
+
+def _bounded_keys(text: str, keys: dict[str, list]) -> list[str]:
+    """Exact identifier hits. A following digit or letter keeps a shorter tag from matching inside a longer one."""
+    hay = (text or "").upper()
+    ident = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
+    found: list[str] = []
+    for key in keys:
+        if len(key) < 4:
+            continue
+        start = 0
+        while True:
+            index = hay.find(key, start)
+            if index < 0:
+                break
+            before = hay[index - 1] if index else ""
+            after_at = index + len(key)
+            after = hay[after_at] if after_at < len(hay) else ""
+            if (not before or before not in ident) and (not after or after not in ident):
+                found.append(key)
+                break
+            start = index + 1
+    return found
+
+
+def _read_upload_text(path: Path) -> tuple[str, str]:
+    """Return extracted text and a short note when extraction did not run."""
+    suffix = path.suffix.lower()
+    try:
+        if suffix in {".txt", ".csv", ".rtf"}:
+            return path.read_text(encoding="utf-8", errors="replace")[:20000], ""
+        if suffix == ".docx":
+            from docx import Document
+
+            document = Document(str(path))
+            parts = [paragraph.text for paragraph in document.paragraphs]
+            for table in document.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        parts.append(cell.text)
+            return "\n".join(parts)[:20000], ""
+        if suffix == ".xlsx":
+            from openpyxl import load_workbook
+
+            book = load_workbook(path, read_only=True, data_only=True)
+            parts: list[str] = []
+            try:
+                for sheet in book.worksheets:
+                    for row in sheet.iter_rows(max_row=80, max_col=12, values_only=True):
+                        for value in row:
+                            if value is not None:
+                                parts.append(str(value))
+                            if len(parts) >= 400:
+                                break
+            finally:
+                book.close()
+            return "\n".join(parts)[:20000], ""
+        if suffix == ".pdf":
+            try:
+                from pypdf import PdfReader
+            except ImportError:
+                return "", "טקסט ה-PDF לא חולץ. ההתאמה משתמשת בשם הקובץ בלבד."
+            try:
+                reader = PdfReader(str(path))
+                parts = [(page.extract_text() or "") for page in reader.pages[:12]]
+                return "\n".join(parts)[:20000], ""
+            except Exception:
+                return "", "טקסט ה-PDF לא חולץ. ההתאמה משתמשת בשם הקובץ בלבד."
+    except Exception:
+        return "", "הטקסט לא חולץ מהמסמך. ההתאמה משתמשת בשם הקובץ בלבד."
+    return "", ""
+
+
+def _area_stated_by_file(conn: sqlite3.Connection, filename: str, body: str) -> str:
+    named = {
+        norm_area(row["name"]): row["name"]
+        for row in conn.execute("SELECT name FROM areas")
+        if norm_area(row["name"]) not in {"", "לא ידוע", "unknown"}
+    }
+    found: list[str] = []
+    for match in AREA_LABEL_RE.finditer(f"{filename}\n{body}"):
+        raw = match.group(1).strip(" .,:;|")
+        piece = re.split(r"[\s_\-]+", raw)[0] if raw else ""
+        options = [raw, piece]
+        for option in options:
+            hit = named.get(norm_area(option))
+            if hit and hit not in found:
+                found.append(hit)
+                break
+    if len(found) == 1:
+        return found[0]
+    return ""
+
+
+def _row_public_brief(conn: sqlite3.Connection, row_id: str) -> dict | None:
+    record = conn.execute("SELECT * FROM inventory_rows WHERE id = ?", (row_id,)).fetchone()
+    if not record:
+        return None
+    return {
+        "id": record["id"],
+        "tag": record["tag_original"] or "",
+        "description": record["description"] or "",
+        "sheet_name": record["sheet_name"] or "",
+        "original_row": record["original_row"],
+        "listed_area": record["listed_area"] or "",
+    }
+
+
+def _clear_capture_row_ids(conn: sqlite3.Connection, capture_id: str) -> list[str]:
+    confirmed = list(
+        conn.execute(
+            """
+            SELECT r.id, r.duplicate_group FROM inventory_rows r
+            JOIN evidence_links l ON l.inventory_row_id = r.id
+            WHERE l.capture_id = ? AND l.review_status IN ('auto_linked', 'user_confirmed')
+            """,
+            (capture_id,),
+        )
+    )
+    if not confirmed:
+        return []
+    groups = {(row["duplicate_group"] or "") for row in confirmed}
+    same_item = len(confirmed) == 1 or (len(groups) == 1 and next(iter(groups)))
+    if not same_item:
+        return []
+    return [row["id"] for row in confirmed]
+
+
+def describe_stored_file(conn: sqlite3.Connection, photo_id: str) -> dict:
+    photo = conn.execute("SELECT * FROM photos WHERE id = ?", (photo_id,)).fetchone()
+    if not photo:
+        return {"file_id": photo_id, "saved": False, "filed": False, "message": "הקובץ לא נשמר בשרת."}
+    path = Path(photo["stored_path"] or "")
+    saved = path.exists() and path.stat().st_size > 0
+    shows = parse_json(photo["shows_json"], {})
+    capture = conn.execute("SELECT * FROM captures WHERE id = ?", (photo["capture_id"],)).fetchone()
+    confirmed_ids = set(_clear_capture_row_ids(conn, photo["capture_id"]))
+    show_ids = shows.get("row_ids") or [] if shows.get("scope") == "rows" else []
+    row_ids = [row_id for row_id in show_ids if row_id in confirmed_ids]
+    rows = [item for item in (_row_public_brief(conn, row_id) for row_id in row_ids) if item]
+    filed = saved and bool(rows)
+    review = conn.execute(
+        """
+        SELECT id FROM review_items
+        WHERE capture_id = ? AND status = 'open'
+        ORDER BY created_at DESC LIMIT 1
+        """,
+        (photo["capture_id"],),
+    ).fetchone()
+    observed = (capture["observed_area_name"] if capture else "") or ""
+    area_source = shows.get("area_source") or ("unknown" if not observed else "file")
+    if filed:
+        message = "נשמר בשרת ותויק אל " + " ; ".join(
+            f"{row['tag']} · {row['description']} · גיליון {row['sheet_name']} שורה {row['original_row']}" for row in rows
+        )
+    elif saved:
+        message = "נשמר בשרת. אין התאמה ברורה, והקובץ ממתין בתור הבדיקה."
+    else:
+        message = "לא נשמר בשרת."
+    return {
+        "file_id": photo_id,
+        "original_name": photo["original_name"] or "",
+        "saved": saved,
+        "filed": filed,
+        "bytes": path.stat().st_size if saved else 0,
+        "capture_id": photo["capture_id"],
+        "rows": rows,
+        "review_id": None if filed or not review else review["id"],
+        "observed_area": observed,
+        "area_source": area_source,
+        "message": message,
+    }
+
+
+def _remember_shows(conn: sqlite3.Connection, photo_id: str, shows: dict) -> None:
+    conn.execute("UPDATE photos SET shows_json = ? WHERE id = ?", (json.dumps(shows, ensure_ascii=False), photo_id))
+
+
+def _mark_capture_files_synced(conn: sqlite3.Connection, capture_id: str, created_at: str) -> bool:
+    photos = list(conn.execute("SELECT * FROM photos WHERE capture_id = ?", (capture_id,)))
+    if not photos:
+        return False
+    for photo in photos:
+        path = Path(photo["stored_path"] or "")
+        if not path.exists() or path.stat().st_size <= 0:
+            conn.execute("UPDATE captures SET sync_status = 'failed', server_received_at = NULL WHERE id = ?", (capture_id,))
+            return False
+    conn.execute(
+        "UPDATE captures SET sync_status = 'synced', server_received_at = ? WHERE id = ?",
+        (created_at, capture_id),
+    )
+    conn.execute("UPDATE photos SET upload_state = 'synced' WHERE capture_id = ?", (capture_id,))
+    return True
+
+
+def file_tour_upload(
+    conn: sqlite3.Connection,
+    *,
+    file_id: str,
+    original_name: str,
+    data: bytes,
+    capture_id: str,
+    allow_open_capture: bool,
+    photo_dir: Path,
+    thumb_dir: Path,
+    created_at: str,
+) -> dict:
+    """Store one tour file on the server and file it only when the match is clear.
+
+    The caller's selected area is not an input. Observed area stays unknown unless
+    the file text names one, or the file is attached to an existing capture that
+    already has one.
+    """
+    name = original_name or "file"
+    if not valid_id(file_id):
+        return {"file_id": file_id, "original_name": name, "saved": False, "filed": False, "rows": [], "message": "הקובץ לא נשמר בשרת."}
+    if not data:
+        return {"file_id": file_id, "original_name": name, "saved": False, "filed": False, "rows": [], "message": "הקובץ ריק ולא נשמר בשרת."}
+    if not tour_type_allowed(name, data):
+        return {
+            "file_id": file_id,
+            "original_name": name,
+            "saved": False,
+            "filed": False,
+            "rows": [],
+            "message": "סוג הקובץ לא נתמך, והוא לא נשמר בשרת.",
+        }
+    existing = conn.execute("SELECT stored_path FROM photos WHERE id = ?", (file_id,)).fetchone()
+    if existing and existing["stored_path"] and Path(existing["stored_path"]).exists() and Path(existing["stored_path"]).stat().st_size > 0:
+        return describe_stored_file(conn, file_id)
+
+    suffix = stored_suffix(name, data)
+    photo_dir.mkdir(parents=True, exist_ok=True)
+    handle, tmp_name = tempfile.mkstemp(suffix=suffix, dir=str(photo_dir))
+    os.close(handle)
+    tmp_path = Path(tmp_name)
+    os_note = ""
+    body = ""
+    ocr_raw = ""
+    try:
+        tmp_path.write_bytes(data)
+        if suffix in IMAGE_SUFFIXES or sniff_image_suffix(data):
+            ocr = run_ocr(str(tmp_path))
+            ocr_raw = ocr.get("raw_text") or ""
+            body = ocr_raw
+            if not ocr.get("available"):
+                os_note = ocr.get("message") or ""
+        else:
+            body, os_note = _read_upload_text(tmp_path)
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+    equipment = equipment_for_match(conn)
+    tags: dict[str, list[dict]] = {}
+    serials: dict[str, list[dict]] = {}
+    for row in equipment:
+        if row.get("tag_norm"):
+            tags.setdefault(row["tag_norm"], []).append(row)
+        if row.get("serial_norm"):
+            serials.setdefault(row["serial_norm"], []).append(row)
+    haystack = f"{name}\n{body}"
+    exact_tags = _bounded_keys(haystack, tags)
+    exact_serials = [token for token in _bounded_keys(haystack, serials) if token not in tags]
+    stated_area = _area_stated_by_file(conn, Path(name).stem, body)
+    area_id, area_name, parent = ("", "", "")
+    area_source = "unknown"
+    if stated_area:
+        area_id, area_name, parent = area_context(conn, None, stated_area)
+        area_source = "file"
+        if not area_name:
+            area_name = stated_area
+
+    open_rows: list[str] = []
+    open_capture = None
+    if allow_open_capture and capture_id and valid_id(capture_id):
+        open_capture = conn.execute("SELECT * FROM captures WHERE id = ?", (capture_id,)).fetchone()
+        if open_capture:
+            open_rows = _clear_capture_row_ids(conn, capture_id)
+
+    identifiers_conflict = False
+    if len(exact_tags) == 1 and exact_serials:
+        tag_ids = {row["id"] for row in tags[exact_tags[0]]}
+        serial_ids = {row["id"] for token in exact_serials for row in serials[token]}
+        if serial_ids and tag_ids.isdisjoint(serial_ids):
+            identifiers_conflict = True
+    chosen_tag = exact_tags[0] if len(exact_tags) == 1 and not identifiers_conflict else ""
+    chosen_serial = exact_serials[0] if len(exact_serials) == 1 and not exact_tags else ""
+    match = None
+    if chosen_tag or chosen_serial:
+        match = match_inventory(
+            equipment,
+            tag=chosen_tag,
+            serial=chosen_serial,
+            observed_area=area_name,
+            observed_parent=parent or "",
+        )
+    suggestions: list[dict] = []
+    if len(exact_tags) > 1 or len(exact_serials) > 1 or identifiers_conflict:
+        for token in exact_tags:
+            for row in tags.get(token, [])[:8]:
+                suggestions.append(
+                    {
+                        "row_id": row["id"],
+                        "tag": row.get("tag_original") or "",
+                        "description": row.get("description") or "",
+                        "sheet_name": row.get("sheet_name") or "",
+                        "original_row": row.get("original_row"),
+                        "why": "התג מופיע בקובץ יחד עם תג אחר. לא נבחרה שורה.",
+                    }
+                )
+        for token in exact_serials:
+            if token in exact_tags:
+                continue
+            for row in serials.get(token, [])[:8]:
+                suggestions.append(
+                    {
+                        "row_id": row["id"],
+                        "tag": row.get("tag_original") or "",
+                        "description": row.get("description") or "",
+                        "sheet_name": row.get("sheet_name") or "",
+                        "original_row": row.get("original_row"),
+                        "why": "המספר הסידורי מופיע בקובץ יחד עם מזהה אחר. לא נבחרה שורה.",
+                    }
+                )
+    elif match and match.get("mode") != "auto":
+        suggestions = match.get("suggestions") or []
+    elif not chosen_tag and not chosen_serial:
+        stem = norm_id(Path(name).stem)
+        probes = [stem] if stem else []
+        for line in (body or "").splitlines():
+            line = line.strip()
+            if 4 <= len(line) <= 40:
+                probes.append(line)
+            if len(probes) >= 6:
+                break
+        for probe in probes:
+            probed = match_inventory(equipment, tag=probe, observed_area=area_name, observed_parent=parent or "")
+            if probed.get("suggestions") and probed.get("mode") != "auto":
+                suggestions = probed["suggestions"]
+                match = probed
+                break
+
+    use_open = False
+    target_capture = ""
+    if match and match.get("mode") == "auto":
+        target_capture = str(uuid.uuid4())
+        if open_rows and {link["row_id"] for link in match["links"]} == set(open_rows):
+            target_capture = capture_id
+            use_open = True
+            if open_capture and (open_capture["observed_area_name"] or "") and area_source != "file":
+                area_source = "existing_capture"
+                area_name = open_capture["observed_area_name"] or ""
+    elif not exact_tags and not exact_serials and not suggestions and open_rows:
+        file_area_conflicts = False
+        if area_source == "file" and open_capture and (open_capture["observed_area_name"] or ""):
+            file_area_conflicts = area_conflict(area_name, open_capture["observed_area_name"] or "", "")
+        if not file_area_conflicts:
+            use_open = True
+            target_capture = capture_id
+            area_source = "existing_capture" if (open_capture and (open_capture["observed_area_name"] or "")) else area_source
+            if area_source == "existing_capture":
+                area_name = open_capture["observed_area_name"] or ""
+                area_id = open_capture["observed_area_id"] or ""
+    if not target_capture:
+        target_capture = str(uuid.uuid4())
+
+    if not use_open:
+        filing_tag = chosen_tag if match and match.get("mode") == "auto" else ""
+        filing_serial = chosen_serial if match and match.get("mode") == "auto" else ""
+        if match and match.get("mode") == "pending" and len(exact_tags) <= 1 and len(exact_serials) <= 1:
+            filing_tag = chosen_tag
+            filing_serial = chosen_serial
+        mode = "auto"
+        if len(exact_tags) > 1 or len(exact_serials) > 1 or identifiers_conflict:
+            mode = "unresolved"
+            filing_tag = ""
+            filing_serial = ""
+        apply_capture(
+            conn,
+            {
+                "id": target_capture,
+                "observed_area_id": area_id or None,
+                "observed_area_name": area_name if area_source == "file" else "",
+                "tag_text": filing_tag,
+                "serial_text": filing_serial,
+                "raw_ocr": (ocr_raw or body or "")[:8000],
+                "match_mode": mode,
+                "finalized": 1,
+                "note": "",
+                "client_updated_at": created_at,
+                "created_at": created_at,
+            },
+            created_at,
+        )
+        if area_source != "file":
+            conn.execute(
+                "UPDATE captures SET observed_area_id = NULL, observed_area_name = '' WHERE id = ?",
+                (target_capture,),
+            )
+
+    role = "document" if suffix in DOCUMENT_SUFFIXES and not sniff_image_suffix(data) else "nameplate"
+    if not (chosen_tag or chosen_serial or ocr_raw):
+        role = "document" if suffix in DOCUMENT_SUFFIXES else "overall"
+    try:
+        save_photo_file(
+            conn,
+            photo_id=file_id,
+            capture_id=target_capture,
+            role=role,
+            original_name=name,
+            data=data,
+            shows={"scope": "unassigned", "row_ids": [], "area_source": area_source},
+            photo_dir=photo_dir,
+            thumb_dir=thumb_dir,
+            created_at=created_at,
+        )
+    except (ValueError, OSError):
+        if not use_open:
+            conn.execute("DELETE FROM evidence_links WHERE capture_id = ?", (target_capture,))
+            conn.execute("DELETE FROM review_items WHERE capture_id = ?", (target_capture,))
+            conn.execute("DELETE FROM photos WHERE capture_id = ?", (target_capture,))
+            conn.execute("DELETE FROM captures WHERE id = ?", (target_capture,))
+        return {"file_id": file_id, "original_name": name, "saved": False, "filed": False, "rows": [], "message": "הקובץ לא נשמר בשרת."}
+
+    if ocr_raw:
+        conn.execute("UPDATE photos SET ocr_raw = ? WHERE id = ?", (ocr_raw[:8000], file_id))
+    maybe_assign_shows(conn, target_capture)
+    photo = conn.execute("SELECT shows_json FROM photos WHERE id = ?", (file_id,)).fetchone()
+    shows = parse_json(photo["shows_json"], {"scope": "unassigned", "row_ids": []})
+    shows["area_source"] = area_source
+    _remember_shows(conn, file_id, shows)
+    synced = _mark_capture_files_synced(conn, target_capture, created_at)
+    filed_now = shows.get("scope") == "rows" and bool(shows.get("row_ids"))
+    if not filed_now:
+        review = conn.execute(
+            "SELECT id, question FROM review_items WHERE capture_id = ? AND status = 'open' ORDER BY created_at DESC LIMIT 1",
+            (target_capture,),
+        ).fetchone()
+        question = f"הקובץ {name} נשמר בשרת. אין התאמה ברורה לשורת מלאי, ולכן הוא לא שויך בניחוש."
+        if match and match.get("explanation"):
+            question = f"{question} {match['explanation']}"
+        if os_note:
+            question = f"{question} {os_note}"
+        row_ids = [item.get("row_id") for item in suggestions if item.get("row_id")][:12]
+        if review:
+            conn.execute(
+                """
+                UPDATE review_items
+                SET question = ?, payload_json = ?, row_ids_json = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    question,
+                    json.dumps({"suggestions": suggestions[:12], "filename": name}, ensure_ascii=False),
+                    json.dumps(row_ids),
+                    created_at,
+                    review["id"],
+                ),
+            )
+        else:
+            upsert_review(
+                conn,
+                kind="unmatched",
+                queue="visit",
+                dedupe_key=f"cap:{target_capture}:unmatched",
+                question=question,
+                priority="high",
+                capture_id=target_capture,
+                row_ids=[item.get("row_id") for item in suggestions if item.get("row_id")][:12],
+                payload={"suggestions": suggestions[:12], "filename": name},
+                created_at=created_at,
+            )
+    result = describe_stored_file(conn, file_id)
+    if not result.get("saved") or not synced:
+        result["saved"] = bool(result.get("saved"))
+    if not result.get("saved"):
+        result["filed"] = False
+        result["message"] = "לא נשמר בשרת."
+    return result
 
 
 def run_ocr(path: str) -> dict:

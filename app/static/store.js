@@ -109,5 +109,15 @@
     return true;
   }
 
-  window.CaptureStore = { openDb, put, get, all, saveCapture, savePhoto, testOfflineStore };
+  async function remove(name, id) {
+    const db = await openDb();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(name, "readwrite");
+      tx.objectStore(name).delete(id);
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error || new Error("storage"));
+    });
+  }
+
+  window.CaptureStore = { openDb, put, get, all, remove, saveCapture, savePhoto, testOfflineStore };
 })();
