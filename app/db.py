@@ -288,7 +288,33 @@ CREATE TABLE IF NOT EXISTS commercial_positions (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS machines (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  status TEXT NOT NULL,
+  sold_together TEXT NOT NULL,
+  basis TEXT NOT NULL,
+  note TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS machine_members (
+  id TEXT PRIMARY KEY,
+  machine_id TEXT NOT NULL,
+  tag_norm TEXT NOT NULL,
+  tag_original TEXT NOT NULL,
+  inventory_row_id TEXT,
+  member_role TEXT NOT NULL,
+  prefix_category TEXT,
+  link_status TEXT NOT NULL,
+  evidence TEXT NOT NULL,
+  UNIQUE(machine_id, tag_norm)
+);
+
 CREATE INDEX IF NOT EXISTS idx_rows_tag ON inventory_rows(tag_norm);
+CREATE INDEX IF NOT EXISTS idx_machine_members_tag ON machine_members(tag_norm);
+CREATE INDEX IF NOT EXISTS idx_machine_members_row ON machine_members(inventory_row_id);
 CREATE INDEX IF NOT EXISTS idx_rows_kind ON inventory_rows(kind);
 CREATE INDEX IF NOT EXISTS idx_photos_capture ON photos(capture_id);
 CREATE INDEX IF NOT EXISTS idx_links_row ON evidence_links(inventory_row_id);

@@ -731,6 +731,7 @@ def _row_public_brief(conn: sqlite3.Connection, row_id: str) -> dict | None:
         "sheet_name": record["sheet_name"] or "",
         "original_row": record["original_row"],
         "listed_area": record["listed_area"] or "",
+        "tag_norm": record["tag_norm"] or "",
     }
 
 
@@ -754,6 +755,41 @@ def _clear_capture_row_ids(conn: sqlite3.Connection, capture_id: str) -> list[st
     return [row["id"] for row in confirmed]
 
 
+def _stored_file_message(saved: bool, filed: bool, rows: list[dict], shows: dict) -> str:
+    labels = shows.get("labels") or []
+    if filed and rows:
+        message = "נשמר בשרת ותויק אל " + " ; ".join(
+            f"{row['tag']} · {row['description']} · גיליון {row['sheet_name']} שורה {row['original_row']}" for row in rows
+        )
+    elif filed and labels:
+        message = "נשמר בשרת ותויק אל " + " ; ".join(
+            f"{label.get('tag')} ({label.get('prefix')})" if label.get("prefix") else str(label.get("tag"))
+            for label in labels
+        )
+    elif saved:
+        message = "נשמר בשרת. אין התאמה ברורה, והקובץ ממתין בתור הבדיקה."
+    else:
+        return "לא נשמר בשרת."
+    if not filed:
+        return message
+    areas = []
+    for label in labels:
+        area = label.get("inventory_area") or ""
+        if area and area not in areas:
+            areas.append(area)
+    if not areas and len(rows) == 1 and rows[0].get("listed_area"):
+        areas.append(rows[0]["listed_area"])
+    if areas:
+        message += " האזור שרשום במלאי: " + ", ".join(areas) + ". זה לא מיקום שאומת מהתמונה."
+    for machine in shows.get("machines") or []:
+        matched = machine.get("matched_tag") or ""
+        others = [tag for tag in (machine.get("other_tags") or []) if tag and tag != matched]
+        message += f" הרכיב {matched} נמצא בתוך {machine.get('name')}."
+        if others:
+            message += " זה לא צילום של " + ", ".join(others) + "."
+    return message
+
+
 def describe_stored_file(conn: sqlite3.Connection, photo_id: str) -> dict:
     photo = conn.execute("SELECT * FROM photos WHERE id = ?", (photo_id,)).fetchone()
     if not photo:
@@ -762,11 +798,18 @@ def describe_stored_file(conn: sqlite3.Connection, photo_id: str) -> dict:
     saved = path.exists() and path.stat().st_size > 0
     shows = parse_json(photo["shows_json"], {})
     capture = conn.execute("SELECT * FROM captures WHERE id = ?", (photo["capture_id"],)).fetchone()
-    confirmed_ids = set(_clear_capture_row_ids(conn, photo["capture_id"]))
+    confirmed_ids = {
+        link["inventory_row_id"]
+        for link in capture_links(conn, photo["capture_id"])
+        if link["review_status"] in {"auto_linked", "user_confirmed"}
+    }
     show_ids = shows.get("row_ids") or [] if shows.get("scope") == "rows" else []
     row_ids = [row_id for row_id in show_ids if row_id in confirmed_ids]
+    if shows.get("scope") == "tags":
+        row_ids = []
     rows = [item for item in (_row_public_brief(conn, row_id) for row_id in row_ids) if item]
-    filed = saved and bool(rows)
+    label_names = [label.get("tag") for label in (shows.get("labels") or []) if label.get("tag")]
+    filed = saved and (bool(rows) or (shows.get("scope") == "tags" and bool(label_names)))
     review = conn.execute(
         """
         SELECT id FROM review_items
@@ -777,14 +820,7 @@ def describe_stored_file(conn: sqlite3.Connection, photo_id: str) -> dict:
     ).fetchone()
     observed = (capture["observed_area_name"] if capture else "") or ""
     area_source = shows.get("area_source") or ("unknown" if not observed else "file")
-    if filed:
-        message = "נשמר בשרת ותויק אל " + " ; ".join(
-            f"{row['tag']} · {row['description']} · גיליון {row['sheet_name']} שורה {row['original_row']}" for row in rows
-        )
-    elif saved:
-        message = "נשמר בשרת. אין התאמה ברורה, והקובץ ממתין בתור הבדיקה."
-    else:
-        message = "לא נשמר בשרת."
+    message = _stored_file_message(saved, filed, rows, shows)
     return {
         "file_id": photo_id,
         "original_name": photo["original_name"] or "",
@@ -796,6 +832,9 @@ def describe_stored_file(conn: sqlite3.Connection, photo_id: str) -> dict:
         "review_id": None if filed or not review else review["id"],
         "observed_area": observed,
         "area_source": area_source,
+        "labels": shows.get("labels") or [],
+        "machines": shows.get("machines") or [],
+        "inventory_area": shows.get("inventory_area") or (rows[0]["listed_area"] if len(rows) == 1 else ""),
         "message": message,
     }
 
@@ -905,6 +944,18 @@ def file_tour_upload(
         if open_capture:
             open_rows = _clear_capture_row_ids(conn, capture_id)
 
+    multi_clear = []
+    if len(exact_tags) > 1 and not stated_area:
+        multi_clear = []
+        blocked = False
+        for token in exact_tags:
+            probed = match_inventory(equipment, tag=token, observed_area=area_name, observed_parent=parent or "")
+            if probed.get("mode") != "auto":
+                blocked = True
+                break
+            multi_clear.extend(probed["links"])
+        if blocked:
+            multi_clear = []
     identifiers_conflict = False
     if len(exact_tags) == 1 and exact_serials:
         tag_ids = {row["id"] for row in tags[exact_tags[0]]}
@@ -912,6 +963,9 @@ def file_tour_upload(
         if serial_ids and tag_ids.isdisjoint(serial_ids):
             identifiers_conflict = True
     chosen_tag = exact_tags[0] if len(exact_tags) == 1 and not identifiers_conflict else ""
+    if multi_clear:
+        chosen_tag = ""
+        identifiers_conflict = False
     chosen_serial = exact_serials[0] if len(exact_serials) == 1 and not exact_tags else ""
     match = None
     if chosen_tag or chosen_serial:
@@ -999,27 +1053,37 @@ def file_tour_upload(
             filing_tag = chosen_tag
             filing_serial = chosen_serial
         mode = "auto"
-        if len(exact_tags) > 1 or len(exact_serials) > 1 or identifiers_conflict:
+        user_links = None
+        if multi_clear:
+            mode = "user"
+            user_links = []
+            seen = set()
+            for link in multi_clear:
+                if link["row_id"] in seen:
+                    continue
+                seen.add(link["row_id"])
+                user_links.append({**link, "method": "user", "review_status": "user_confirmed", "reason": "כל תג שנראה בקובץ חד-משמעי. רכיב שלא נראה לא סומן."})
+            filing_tag = " ".join(exact_tags)
+        elif len(exact_tags) > 1 or len(exact_serials) > 1 or identifiers_conflict:
             mode = "unresolved"
             filing_tag = ""
             filing_serial = ""
-        apply_capture(
-            conn,
-            {
-                "id": target_capture,
-                "observed_area_id": area_id or None,
-                "observed_area_name": area_name if area_source == "file" else "",
-                "tag_text": filing_tag,
-                "serial_text": filing_serial,
-                "raw_ocr": (ocr_raw or body or "")[:8000],
-                "match_mode": mode,
-                "finalized": 1,
-                "note": "",
-                "client_updated_at": created_at,
-                "created_at": created_at,
-            },
-            created_at,
-        )
+        payload = {
+            "id": target_capture,
+            "observed_area_id": area_id or None,
+            "observed_area_name": area_name if area_source == "file" else "",
+            "tag_text": filing_tag,
+            "serial_text": filing_serial,
+            "raw_ocr": (ocr_raw or body or "")[:8000],
+            "match_mode": mode,
+            "finalized": 1,
+            "note": "",
+            "client_updated_at": created_at,
+            "created_at": created_at,
+        }
+        if user_links is not None:
+            payload["links"] = user_links
+        apply_capture(conn, payload, created_at)
         if area_source != "file":
             conn.execute(
                 "UPDATE captures SET observed_area_id = NULL, observed_area_name = '' WHERE id = ?",
@@ -1055,10 +1119,57 @@ def file_tour_upload(
     maybe_assign_shows(conn, target_capture)
     photo = conn.execute("SELECT shows_json FROM photos WHERE id = ?", (file_id,)).fetchone()
     shows = parse_json(photo["shows_json"], {"scope": "unassigned", "row_ids": []})
-    shows["area_source"] = area_source
+    if area_source == "file":
+        shows["area_source"] = "file"
+    elif area_source == "existing_capture":
+        shows["area_source"] = "existing_capture"
+    else:
+        shows["area_source"] = "unknown"
+    labels = []
+    linked_ids = [link["inventory_row_id"] for link in capture_links(conn, target_capture) if link["review_status"] in {"auto_linked", "user_confirmed"}]
+    if linked_ids:
+        shows["scope"] = "rows"
+        shows["row_ids"] = linked_ids
+        for row_id in linked_ids:
+            brief = _row_public_brief(conn, row_id)
+            if not brief:
+                continue
+            labels.append({
+                "row_id": row_id,
+                "tag": brief["tag"],
+                "tag_norm": brief.get("tag_norm") or (brief["tag"] or "").upper(),
+                "prefix": __import__("app.machines", fromlist=["prefix_label"]).prefix_label(brief["tag"]),
+                "inventory_area": brief["listed_area"],
+            })
+    else:
+        from app.machines import membership_for_tags
+
+        member_index = {
+            row["tag_norm"]: row["tag_original"]
+            for row in conn.execute("SELECT tag_norm, tag_original FROM machine_members WHERE link_status = 'active'")
+        }
+        seen_members = _bounded_keys(haystack, {tag: [] for tag in member_index if tag not in tags})
+        if seen_members and not exact_tags and not exact_serials:
+            shows["scope"] = "tags"
+            shows["row_ids"] = []
+            for token in seen_members:
+                labels.append({
+                    "row_id": "",
+                    "tag": member_index[token],
+                    "tag_norm": token,
+                    "prefix": __import__("app.machines", fromlist=["prefix_label"]).prefix_label(token),
+                    "inventory_area": "",
+                })
+    shows["labels"] = labels
+    if labels:
+        from app.machines import membership_for_tags
+
+        shows["machines"] = membership_for_tags(conn, [label["tag_norm"] for label in labels])
+        areas = [label["inventory_area"] for label in labels if label.get("inventory_area")]
+        shows["inventory_area"] = areas[0] if len(set(areas)) == 1 else ""
     _remember_shows(conn, file_id, shows)
     synced = _mark_capture_files_synced(conn, target_capture, created_at)
-    filed_now = shows.get("scope") == "rows" and bool(shows.get("row_ids"))
+    filed_now = (shows.get("scope") == "rows" and bool(shows.get("row_ids"))) or (shows.get("scope") == "tags" and bool(shows.get("labels")))
     if not filed_now:
         review = conn.execute(
             "SELECT id, question FROM review_items WHERE capture_id = ? AND status = 'open' ORDER BY created_at DESC LIMIT 1",
@@ -1079,7 +1190,12 @@ def file_tour_upload(
                 """,
                 (
                     question,
-                    json.dumps({"suggestions": suggestions[:12], "filename": name}, ensure_ascii=False),
+                    json.dumps({
+                        "suggestions": suggestions[:12],
+                        "filename": name,
+                        "photo_ids": [file_id],
+                        "resolve_by": "תג שנקרא בבירור, או בחירה מבין השורות המוצגות. אפשר להעלות עוד קבצים לפני שהשאלה נסגרת.",
+                    }, ensure_ascii=False),
                     json.dumps(row_ids),
                     created_at,
                     review["id"],
@@ -1095,7 +1211,12 @@ def file_tour_upload(
                 priority="high",
                 capture_id=target_capture,
                 row_ids=[item.get("row_id") for item in suggestions if item.get("row_id")][:12],
-                payload={"suggestions": suggestions[:12], "filename": name},
+                payload={
+                    "suggestions": suggestions[:12],
+                    "filename": name,
+                    "photo_ids": [file_id],
+                    "resolve_by": "תג שנקרא בבירור, או בחירה מבין השורות המוצגות. אפשר להעלות עוד קבצים לפני שהשאלה נסגרת.",
+                },
                 created_at=created_at,
             )
     result = describe_stored_file(conn, file_id)
@@ -1289,6 +1410,71 @@ def undo_change(conn: sqlite3.Connection, log_id: int, created_at: str) -> dict:
     return {"undone": log_id}
 
 
+def attach_review_file(
+    conn: sqlite3.Connection,
+    review_id: str,
+    *,
+    file_id: str,
+    original_name: str,
+    data: bytes,
+    photo_dir: Path,
+    thumb_dir: Path,
+    created_at: str,
+) -> dict:
+    """Store supporting material on a task and file it when the tag itself is clear."""
+    item = conn.execute("SELECT * FROM review_items WHERE id = ?", (review_id,)).fetchone()
+    if not item:
+        raise LookupError("השאלה לא נמצאה.")
+    result = file_tour_upload(
+        conn,
+        file_id=file_id,
+        original_name=original_name,
+        data=data,
+        capture_id="",
+        allow_open_capture=False,
+        photo_dir=photo_dir,
+        thumb_dir=thumb_dir,
+        created_at=created_at,
+    )
+    payload = parse_json(item["payload_json"], {})
+    photo_ids = [str(photo_id) for photo_id in (payload.get("photo_ids") or [])]
+    if result.get("saved") and result.get("file_id") and result["file_id"] not in photo_ids:
+        photo_ids.append(result["file_id"])
+    payload["photo_ids"] = photo_ids
+    payload["last_upload"] = {
+        "file_id": result.get("file_id"),
+        "saved": bool(result.get("saved")),
+        "filed": bool(result.get("filed")),
+        "message": result.get("message") or "",
+        "rows": result.get("rows") or [],
+        "labels": result.get("labels") or [],
+    }
+    if result.get("saved") and result.get("filed"):
+        message = (result.get("message") or "נשמר בשרת.") + " הרשומה שהתאמה אליה עודכנה. השאלה נשארת פתוחה עד תשובה."
+        missing = None
+    elif result.get("saved"):
+        message = (result.get("message") or "נשמר בשרת.") + " השאלה נשארת פתוחה."
+        missing = message
+    else:
+        message = result.get("message") or "הקובץ לא נשמר בשרת."
+        missing = "הקובץ לא נשמר, והשאלה לא נסגרה."
+    conn.execute(
+        """
+        UPDATE review_items
+        SET payload_json = ?, missing_reason = ?, updated_at = ?, status = CASE WHEN status = 'resolved' THEN status ELSE 'open' END
+        WHERE id = ?
+        """,
+        (json.dumps(payload, ensure_ascii=False), missing, created_at, review_id),
+    )
+    return {
+        "ok": bool(result.get("saved")),
+        "closed": False,
+        "message": message,
+        "photo_id": result.get("file_id"),
+        "filed": bool(result.get("filed")),
+    }
+
+
 def review_action(conn: sqlite3.Connection, review_id: str, body: dict, created_at: str) -> dict:
     item = conn.execute("SELECT * FROM review_items WHERE id = ?", (review_id,)).fetchone()
     if not item:
@@ -1328,6 +1514,15 @@ def review_action(conn: sqlite3.Connection, review_id: str, body: dict, created_
         )
         return {"status": "resolved"}
     if action == "leave_separate":
+        if item["kind"] == "grouping":
+            payload = parse_json(item["payload_json"], {})
+            machine = payload.get("machine_id")
+            if not machine:
+                return {"status": item["status"], "missing": "אין יחידה לפרק."}
+            from app.machines import machine_action
+
+            machine_action(conn, machine, {"action": "dissolve"}, created_at)
+            return {"status": "resolved"}
         if item["kind"] not in {"duplicate_tag", "generic_name", "ambiguous", "unmatched"}:
             return {"status": item["status"], "missing": "הפעולה הזו לא מתאימה לשאלה."}
         conn.execute(
@@ -1386,6 +1581,25 @@ def review_action(conn: sqlite3.Connection, review_id: str, body: dict, created_
                 created_at,
             )
         return {"status": "open", "corrected": True}
+    if action == "resolve" and item["kind"] == "grouping":
+        text = (body.get("text") or "").strip()
+        if len(text) < 2:
+            conn.execute(
+                "UPDATE review_items SET missing_reason = ?, updated_at = ? WHERE id = ?",
+                ("חסרה תשובה כתובה. העלאת קובץ לבד לא סוגרת את השאלה.", created_at, review_id),
+            )
+            return {"status": item["status"], "missing": "חסרה תשובה כתובה. העלאת קובץ לבד לא סוגרת את השאלה."}
+        payload = parse_json(item["payload_json"], {})
+        machine = payload.get("machine_id")
+        if machine:
+            from app.machines import machine_action
+
+            machine_action(conn, machine, {"action": "note", "text": text}, created_at)
+        return {
+            "status": "open",
+            "noted": True,
+            "message": "התשובה נשמרה על היחידה. המכירה יחד נשארת פתוחה עד אישור או פירוק.",
+        }
     if action == "resolve" and str(item["kind"]).startswith("valuation"):
         return {
             "status": item["status"],
@@ -1559,6 +1773,7 @@ def public_row(record: sqlite3.Row, source_name: str) -> dict:
         "installation_raw": record["installation_raw"] or "",
         "labels": parse_json(record["labels_json"], []),
         "duplicate_group": record["duplicate_group"] or "",
+        "prefix_category": __import__("app.machines", fromlist=["prefix_label"]).prefix_label(record["tag_original"] or record["tag_norm"] or ""),
         "raw": parse_json(record["raw_json"], {}),
     }
 

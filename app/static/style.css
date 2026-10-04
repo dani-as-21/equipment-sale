@@ -86,6 +86,8 @@ body.dropping::before {
   font-size: 1.35rem;
 }
 .tour-file { padding: 8px 0; border-bottom: 1px solid var(--line); }
+.machine-member { border-top: 1px solid var(--line); padding: 8px 0; }
+.machine-member.removed { opacity: 0.72; }
 
 .thumbs { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; }
 .thumb { width: 112px; flex: 0 0 auto; }
@@ -98,7 +100,7 @@ body.dropping::before {
   padding-bottom: env(safe-area-inset-bottom);
 }
 .nav button {
-  flex: 1; border: 0; background: transparent; min-height: 64px; color: var(--muted); font-size: 0.82rem;
+  flex: 1; border: 0; background: transparent; min-height: 64px; color: var(--muted); font-size: 0.74rem;
 }
 .commercial { border-style: dashed; background: transparent; }
 .facts div, .check div { padding: 6px 0; border-bottom: 1px solid var(--line); }

@@ -50,6 +50,9 @@ async def lifespan(app: FastAPI):
     conn = connect()
     try:
         importer.seed_sources(conn, settings.sources_dir, logic.now_iso())
+        from app import machines
+
+        machines.ensure_machines(conn, logic.now_iso())
         conn.commit()
     finally:
         conn.close()
@@ -155,6 +158,7 @@ def create_app() -> FastAPI:
             "relationships": relationships,
             "summary": summary,
             "files": files,
+            "machines": __import__("app.machines", fromlist=["public_machines"]).public_machines(conn),
             "labels": {
                 "saved_on_device": "נשמר במכשיר אינו גיבוי. מחיקת נתוני האתר או אובדן המכשיר מוחקים צילומים שטרם סונכרנו.",
             },
@@ -225,6 +229,9 @@ def create_app() -> FastAPI:
             "history": history,
             "observed_areas": list(dict.fromkeys(observed)),
             "relationship_note": "הערת קשר נשמרת רק אם מישהו אמר אותה. קישור צילום לכמה שורות אינו קשר מערכת.",
+            "machines": __import__("app.machines", fromlist=["membership_for_tags"]).membership_for_tags(
+                conn, [record["tag_norm"]] if record["tag_norm"] else []
+            ),
         }
 
     @app.post("/api/match")
@@ -392,6 +399,18 @@ def create_app() -> FastAPI:
                 )
         return {"results": results, "area_required": False}
 
+    @app.post("/api/machines/{machine_id}/action")
+    def machine_act(machine_id: str, request: Request, body: dict, conn=Depends(get_conn)):
+        require_user(request)
+        from app.machines import machine_action
+
+        try:
+            return machine_action(conn, machine_id, body, logic.now_iso())
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     @app.post("/api/captures/{capture_id}/split")
     def split(capture_id: str, request: Request, body: dict, conn=Depends(get_conn)):
         require_user(request)
@@ -471,30 +490,23 @@ def create_app() -> FastAPI:
     @app.post("/api/review/{review_id}/photo")
     async def review_photo(review_id: str, request: Request, conn=Depends(get_conn), file: UploadFile = File(...)):
         require_user(request)
-        item = conn.execute("SELECT * FROM review_items WHERE id = ?", (review_id,)).fetchone()
-        if not item or not item["capture_id"]:
-            raise HTTPException(status_code=400, detail="אין קליטה לצרף אליה את הקובץ.")
         data = await file.read()
-        photo_id = __import__("uuid").uuid4().__str__()
+        if len(data) > 25 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="הקובץ גדול מדי ולא נשמר.")
         settings = get_settings()
-        logic.save_photo_file(
-            conn,
-            photo_id=photo_id,
-            capture_id=item["capture_id"],
-            role="nameplate",
-            original_name=file.filename or "photo.jpg",
-            data=data,
-            shows={"scope": "unassigned", "row_ids": []},
-            photo_dir=settings.photo_dir,
-            thumb_dir=settings.thumb_dir,
-            created_at=logic.now_iso(),
-        )
-        message = "הקובץ נוסף לקליטה, אבל השאלה עדיין פתוחה. העלאה לבד לא עונה עליה."
-        conn.execute(
-            "UPDATE review_items SET missing_reason = ?, updated_at = ? WHERE id = ?",
-            (message, logic.now_iso(), review_id),
-        )
-        return {"ok": True, "closed": False, "message": message, "photo_id": photo_id}
+        try:
+            return logic.attach_review_file(
+                conn,
+                review_id,
+                file_id=__import__("uuid").uuid4().__str__(),
+                original_name=file.filename or "photo.jpg",
+                data=data,
+                photo_dir=settings.photo_dir,
+                thumb_dir=settings.thumb_dir,
+                created_at=logic.now_iso(),
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.post("/api/undo/{log_id}")
     def undo(log_id: int, request: Request, conn=Depends(get_conn)):

@@ -40,6 +40,10 @@
     visitPrep: null,
     tourResults: [],
     tourBusy: false,
+    machines: [],
+    machineQuery: "",
+    machineFilter: "active",
+    openMachine: null,
   };
 
   const STATUS_HE = {
@@ -135,6 +139,7 @@
     else if (location.hash.startsWith("#/value")) S.screen = "value";
     else if (location.hash.startsWith("#/comparables")) S.screen = "comparables";
     else if (location.hash.startsWith("#/visit-prep")) S.screen = "visit-prep";
+    else if (location.hash.startsWith("#/machines")) S.screen = "machines";
     else S.screen = "capture";
     try {
       await Store.openDb();
@@ -186,6 +191,7 @@
     S.files = data.files || S.files;
     S.summary = data.summary || S.summary;
     S.relationships = data.relationships || S.relationships;
+    if (data.machines) S.machines = data.machines;
     if (data.rows) {
       S.rows = data.rows.filter((row) => row.kind === "equipment");
       S.rowById = {};
@@ -575,6 +581,7 @@
       <nav class="nav">
         <button type="button" data-go="capture" class="${S.screen === "capture" ? "active" : ""}">קליטה</button>
         <button type="button" data-go="inventory" class="${S.screen === "inventory" || S.screen === "row" ? "active" : ""}">מלאי</button>
+        <button type="button" data-go="machines" class="${S.screen === "machines" ? "active" : ""}">מכונות</button>
         <button type="button" data-go="review" class="${S.screen === "review" ? "active" : ""}">בדיקה${openReviews ? " (" + openReviews + ")" : ""}</button>
         <button type="button" data-go="visit" class="${S.screen === "visit" ? "active" : ""}">סיכום</button>
         <button type="button" data-go="value" class="${S.screen === "value" || S.screen === "value-detail" ? "active" : ""}">שווי</button>
@@ -582,22 +589,33 @@
   }
 
   function tourAreaLine(item) {
+    if (item.inventory_area) return `אזור שרשום במלאי: ${item.inventory_area}. זה לא מיקום שאומת מהתמונה.`;
     if (item.area_source === "file" && item.observed_area) return `האזור נלקח מהקובץ: ${item.observed_area}`;
     if (item.area_source === "existing_capture") return `האזור נלקח מהקליטה שכבר פתוחה: ${item.observed_area || "לא ידוע"}`;
     const listed = [...new Set((item.rows || []).map((row) => row.listed_area).filter(Boolean))];
-    if (listed.length) return `אזור שנצפה: לא ידוע. האזור שכבר רשום בשורה: ${listed.join(", ")}`;
+    if (listed.length) return `אזור שנצפה: לא ידוע. האזור שרשום במלאי: ${listed.join(", ")}. זה לא מיקום שאומת מהתמונה.`;
     return "אזור: לא ידוע";
   }
 
   function tourResultHtml(item) {
     const rows = item.filed ? (item.rows || []) : [];
     const where = rows.map((row) => `${ltr(row.tag)} ${esc(row.description)} · גיליון ${ltr(row.sheet_name)} שורה ${esc(row.original_row)}`).join("<br>");
+    const labels = (item.labels || []).map((label) => `${ltr(label.tag)}${label.prefix ? " · " + esc(label.prefix) : ""}`).join("<br>");
+    const machines = (item.machines || []).map((machine) => {
+      const others = (machine.other_tags || []).filter((tag) => tag && tag !== machine.matched_tag);
+      const sale = machine.sold_together === "confirmed" ? "מכירה יחד אושרה" : "מכירה יחד עדיין פתוחה";
+      const state = machine.status === "confirmed" ? "יחידה מאושרת" : "יחידה מוצעת";
+      const prefix = machine.prefix ? ` · ${esc(machine.prefix)}` : "";
+      const sibling = others.length ? ` זה לא צילום של ${others.map((tag) => ltr(tag)).join(", ")}.` : "";
+      return `<div class="hint">צילום של ${ltr(machine.matched_tag)}${prefix}, בתוך ${esc(machine.name)} (${state}, ${sale}).${sibling}</div>`;
+    }).join("");
     const state = item.saved ? "נשמר בשרת" : "לא נשמר בשרת";
+    const filedLine = where || labels;
     return `
       <div class="tour-file" data-tour-file="${esc(item.file_id || item.original_name || "")}" data-saved="${item.saved ? "yes" : "no"}" data-filed="${item.filed ? "yes" : "no"}">
         <b>${ltr(item.original_name || "קובץ")}</b>
         <div class="${item.saved ? "ok" : "error"}">${esc(state)}</div>
-        ${item.filed ? `<div>תויק אל ${where}</div>` : (item.saved ? `<div class="warn">אין התאמה ברורה. הקובץ בתור הבדיקה, בלי ניחוש.</div>` : "")}
+        ${item.filed ? `<div>תויק אל ${filedLine}</div>${machines}` : (item.saved ? `<div class="warn">אין התאמה ברורה. הקובץ בתור הבדיקה, בלי ניחוש.</div>` : "")}
         <div class="hint">${esc(tourAreaLine(item))}</div>
         ${item.saved ? "" : `<div class="hint">${esc(item.message || "הקובץ לא נשמר בשרת.")}</div>`}
       </div>`;
@@ -619,9 +637,12 @@
     return `
       <div class="drop-zone" data-drop-zone="tour">
         <h2>קבצים מהסיור</h2>
-        <p>גררו לכאן קבוצת תמונות ומסמכים, או בחרו כמה קבצים יחד. בלי תיקייה, בלי שינוי שם, ובלי להקליד מזהה.</p>
-        <p class="hint">אין צורך לבחור אזור. הוא נשאר לא ידוע, אלא אם הקובץ או רשומה שכבר קיימת מציינים אותו. התאמה ברורה מתויקת לשורה. אם היא לא ברורה, הקובץ נשמר בשרת ונכנס לתור הבדיקה.</p>
-        <label class="btn file-btn">בחירת קבצים<input type="file" data-action="tour-files" multiple accept="image/*,.pdf,.doc,.docx,.txt,.csv,.xls,.xlsx,.rtf,.heic,.tif,.tiff"></label>
+        <p>העלו תמונה אחת או כמה מיד. בלי לבחור אזור, נכס או מערכת, ובלי לחכות ששאלה קודמת תיסגר.</p>
+        <p class="hint">תג או שלט שנקרא בבירור מתויק לפריט ולמכונה שמכילה אותו. אזור שמופיע אחר כך הוא האזור שרשום במלאי, לא מיקום שאומת מהתמונה. אם הזיהוי לא ברור, הקובץ נשמר ומחכה בבדיקה.</p>
+        <div class="actions">
+          <label class="btn file-btn">מצלמה<input type="file" accept="image/*" capture="environment" data-action="tour-files" multiple></label>
+          <label class="btn file-btn">בחירת קבצים<input type="file" data-action="tour-files" multiple accept="image/*,.pdf,.doc,.docx,.txt,.csv,.xls,.xlsx,.rtf,.heic,.tif,.tiff"></label>
+        </div>
         ${S.tourBusy ? `<p>מעלה את הקבצים לשרת…</p>` : ""}
         ${pendingHtml}
         ${results}
@@ -776,7 +797,7 @@
         ${tourPanel()}
         <div class="card">
           <h2>קליטת ציוד</h2>
-          <p class="hint">אפשר לגרור קבוצת קבצים בלי לבחור אזור. לקליטה של פריט אחד: בוחרים אזור, מצלמים את הציוד ואת התג, ועוברים לפריט הבא.</p>
+          <p class="hint">אפשר לצלם או לגרור קבצים מיד, בלי לבחור אזור. קליטה של פריט אחד עם הערה נשארת למטה, והאזור שלה לא חל על התמונות האלה.</p>
           <button class="btn-primary" type="button" data-action="new-capture">ציוד חדש</button>
         </div>
         ${recent.map(miniCapture).join("")}
@@ -817,9 +838,11 @@
         <button class="btn-quiet" type="button" data-action="apply-current-area">עדכן את הקליטה הזו לאזור הנוכחי</button>
         ${statusHtml(cap)}
         <div class="actions">
-          <label class="btn file-btn">מצלמה<input type="file" accept="image/*" capture="environment" data-action="files" multiple></label>
-          <label class="btn file-btn">קובץ<input type="file" accept="image/*" data-action="files" multiple></label>
+          <label class="btn file-btn">מצלמה<input type="file" accept="image/*" capture="environment" data-action="tour-files" multiple></label>
+          <label class="btn file-btn">קובץ<input type="file" accept="image/*" data-action="tour-files" multiple></label>
+          <label class="btn-quiet file-btn">צרף לקליטה הזו<input type="file" accept="image/*" data-action="files" multiple></label>
         </div>
+        <p class="hint">המצלמה והקובץ מזוהים מהתג שבצילום, בלי האזור שעל המסך. צירוף לקליטה הזו שומר את התמונה על הפריט שכבר פתוח.</p>
         <div class="thumbs">${thumbs || `<p class="hint">עדיין אין צילום. אפשר גם להמשיך בלי צילום.</p>`}</div>
         <label>תג זיהוי<input id="tag-field" class="ltr" dir="ltr" type="text" data-action="tag" value="${esc(cap.tag_text || "")}" autocomplete="off"></label>
         <div class="actions">
@@ -908,6 +931,7 @@
           flag.identity === "auto_linked" ? `<span class="chip ok">קושר אוטומטית</span>` : "",
           flag.identity === "user_confirmed" ? `<span class="chip ok">אושר ידנית</span>` : "",
           ...(row.labels || []).map((label) => `<span class="chip warn">${esc(label)}</span>`),
+          row.prefix_category ? `<span class="chip">${esc(row.prefix_category)}</span>` : "",
           row.duplicate_group ? `<span class="chip">כפילות משוערת</span>` : "",
         ].join("");
         return `<button class="list-item" type="button" data-go-row="${esc(row.id)}">
@@ -950,6 +974,8 @@
         </div>
         <p><a href="#/value/row/${esc(row.id)}">כרטיס שווי של השורה הזו</a></p>
         <p class="hint">השווי נשען על אותה שורה ועל אותם צילומים. עובדה שכבר בקובץ לא מוקלדת מחדש.</p>
+        ${row.prefix_category ? `<p><b>קטגוריה לפי הקידומת:</b> ${esc(row.prefix_category)}. הקידומת אינה מזהה את המכונה.</p>` : ""}
+        ${machineLinksHtml(row)}
         <p><b>אזור ברשימה:</b> ${ltr(row.listed_area || "לא ידוע")}</p>
         <p><b>אזור שנצפה:</b> ${observed.length ? observed.map((area) => ltr(area)).join(", ") : "עדיין לא נצפה בסיור"}</p>
         ${differ ? `<div class="warn">האזור בסיור והאזור ברשימה שונים. שניהם נשמרים.</div>` : ""}
@@ -958,13 +984,95 @@
         <p class="hint">כמות בקובץ: ${row.quantity ? ltr(row.quantity) : "לא צוינה"}.</p>
       </div>
       <div class="card"><h3>צילומים והערות</h3>
-        ${photos.map((photo) => `<figure><img src="${esc(photo.url || `/api/photos/${photo.id}/thumb`)}" alt="צילום" style="max-width:100%;border-radius:12px"><figcaption class="hint">${esc(roleLabel(photo.role || ""))} · ${esc((S.captures[photo.captureId || photo.capture_id] || {}).note || "")}</figcaption></figure>`).join("") || `<p class="hint">אין צילום מקושר.</p>`}
+        ${photos.map((photo) => `<figure><img src="${esc(photo.url || `/api/photos/${photo.id}/thumb`)}" alt="צילום" style="max-width:100%;border-radius:12px"><figcaption class="hint">${esc(photoSubject(photo, row))} · ${esc((S.captures[photo.captureId || photo.capture_id] || {}).note || "")}</figcaption></figure>`).join("") || `<p class="hint">אין צילום מקושר.</p>`}
       </div>
       <div class="card"><h3>הערות קשר שנאמרו</h3>
         <p class="hint">הערה כזו לא נוצרת מקישור הצילום.</p>
         ${S.relationships.filter((rel) => caps.includes(rel.capture_id)).map((rel) => `<p>${esc(rel.text)} <span class="hint">${esc(rel.person || "")} · ${esc(rel.status)}</span></p>`).join("") || `<p class="hint">אין.</p>`}
       </div>
       <details class="card"><summary>תאים מקוריים</summary><div class="raw">${rawRows}</div></details>`;
+  }
+
+  function photoSubject(photo, row) {
+    const labels = ((photo.shows || {}).labels || []).map((label) => label.tag).filter(Boolean);
+    if (labels.length) return "צילום של " + labels.join(", ");
+    if (row && row.tag_original) return "צילום של " + row.tag_original;
+    return roleLabel(photo.role || "");
+  }
+
+  function machineLinksHtml(row) {
+    const found = (S.machines || []).filter((machine) => (machine.members || []).some((member) => member.row_id === row.id && member.link_status !== "removed"));
+    if (!found.length) return "";
+    return found.map((machine) => {
+      const member = machine.members.find((item) => item.row_id === row.id);
+      const sale = machine.sold_together === "confirmed" ? "מכירה יחד אושרה" : "מכירה יחד פתוחה";
+      return `<p><button type="button" class="btn" data-action="open-machine" data-id="${esc(machine.id)}">${esc(machine.name)}</button> <span class="hint">${member && member.role === "parent" ? "הורה" : "רכיב"} · ${machine.status === "confirmed" ? "אושר" : "הצעה"} · ${sale}. היחידה אינה שורה נוספת במלאי.</span></p>`;
+    }).join("");
+  }
+
+  function machineStatusText(machine) {
+    const state = machine.status === "confirmed" ? "אושר" : machine.status === "dissolved" ? "פורק" : "הצעה";
+    const sale = machine.sold_together === "confirmed" ? "מכירה יחד אושרה" : "מכירה יחד פתוחה";
+    return `${state} · ${sale}`;
+  }
+
+  function machineControls(machine) {
+    if (!machine || machine.status === "dissolved") return "";
+    const active = (machine.members || []).filter((member) => member.link_status !== "removed");
+    return `
+      <div class="actions">
+        <button class="btn" type="button" data-action="machine-act" data-machine-act="confirm" data-id="${esc(machine.id)}">אשר את הקיבוץ</button>
+        <button class="btn-primary" type="button" data-action="machine-act" data-machine-act="confirm_sale" data-id="${esc(machine.id)}">אשר מכירה יחד</button>
+        <button class="btn" type="button" data-action="machine-act" data-machine-act="dissolve" data-id="${esc(machine.id)}">פרק בלי למחוק שורות</button>
+      </div>
+      <label>שם היחידה<input id="machine-name-${esc(machine.id)}" value="${esc(machine.name || "")}"></label>
+      <button class="btn" type="button" data-action="machine-act" data-machine-act="correct" data-id="${esc(machine.id)}">שמור שם</button>
+      <label>צרף תג קיים<input id="machine-add-${esc(machine.id)}" class="ltr" dir="ltr" placeholder="למשל P-1001"></label>
+      <button class="btn" type="button" data-action="machine-act" data-machine-act="combine" data-id="${esc(machine.id)}">צרף</button>
+      ${active.length ? `<div class="hint">סמנו רכיב להוצאה. השורה נשארת במלאי.</div>${active.map((member) => `<label class="suggest"><input type="checkbox" data-machine-tag="${esc(member.tag_norm)}" data-machine="${esc(machine.id)}"> ${ltr(member.tag)} · ${esc(member.prefix || "")}</label>`).join("")}<button class="btn" type="button" data-action="machine-act" data-machine-act="split" data-id="${esc(machine.id)}">הוצא את המסומנים</button>` : ""}`;
+  }
+
+  function renderMachines() {
+    const q = S.machineQuery.trim().toLowerCase();
+    let machines = S.machines || [];
+    if (S.machineFilter === "active") machines = machines.filter((machine) => machine.status !== "dissolved");
+    if (S.machineFilter === "confirmed") machines = machines.filter((machine) => machine.status === "confirmed");
+    if (S.machineFilter === "proposed") machines = machines.filter((machine) => machine.status === "proposed");
+    if (S.machineFilter === "dissolved") machines = machines.filter((machine) => machine.status === "dissolved");
+    if (q) {
+      machines = machines.filter((machine) => [machine.name, machine.note, ...(machine.members || []).map((member) => `${member.tag} ${member.description || ""}`)].join(" ").toLowerCase().includes(q));
+    }
+    const filters = [["active", "פעילות"], ["confirmed", "אושרו"], ["proposed", "הצעות"], ["dissolved", "פורקו"]];
+    return `
+      <div class="card">
+        <h2>מכונות ורכיבים</h2>
+        <p class="hint">קידומת היא קטגוריה בלבד. מספר משותף לבדו לא יוצר מכונה. R-4208 ו-F-4208 אושרו על ידי המשתמש כיחידה אחת שנמכרת יחד. שאר הקיבוצים הם הצעה כשהתיאור מזכיר תג אחר. שורת אקסל לא נמחקת, והיחידה לא נספרת שוב כשווי או כהתחייבות מכירה.</p>
+      </div>
+      <input type="search" placeholder="חיפוש שם או תג" value="${esc(S.machineQuery)}" data-action="machine-search">
+      <div class="filters">
+        ${filters.map(([id, label]) => `<button type="button" data-action="machine-filter" data-filter="${id}" class="${S.machineFilter === id ? "on" : ""}">${label}</button>`).join("")}
+      </div>
+      <p class="hint">${machines.length} יחידות לפי הסינון.</p>
+      ${machines.slice(0, 80).map((machine) => {
+        const open = S.openMachine === machine.id ? "open" : "";
+        const members = machine.members || [];
+        return `<details class="card" ${open}>
+          <summary><b>${esc(machine.name)}</b><div class="hint">${esc(machineStatusText(machine))} · ${ltr(machine.id)}</div></summary>
+          <p class="hint">${esc(machine.note || "")}</p>
+          ${members.map((member) => `
+            <div class="machine-member ${member.link_status === "removed" ? "removed" : ""}">
+              <b>${member.role === "parent" ? "הורה" : "רכיב"}: ${ltr(member.tag)}</b>
+              ${member.prefix ? `<span class="chip">${esc(member.prefix)}</span>` : ""}
+              ${member.link_status === "removed" ? `<span class="chip">הוצא מהיחידה</span>` : ""}
+              <div class="hint">${member.in_inventory ? `${esc(member.sheet_name)} שורה ${esc(member.original_row)} · ${esc(member.description || "")}` : "אין שורת אקסל לתג הזה. לא הומצאה שורה."}</div>
+              <div class="hint">${esc(member.evidence || "")}</div>
+              ${(member.photos || []).map((photo) => `<figure><img src="/api/photos/${esc(photo.id)}/thumb" alt="" style="max-width:100%;border-radius:12px"><figcaption class="hint">צילום של ${ltr(photo.of_tag)}. זה לא צילום של רכיב אחר ביחידה.</figcaption></figure>`).join("")}
+              ${member.row_id ? `<p><a href="#/row/${esc(member.row_id)}">שורת המלאי</a></p>` : ""}
+            </div>`).join("")}
+          ${machineControls(machine)}
+        </details>`;
+      }).join("")}
+      ${machines.length > 80 ? `<p class="hint">מוצגות 80 יחידות. צמצמו בחיפוש.</p>` : ""}`;
   }
 
   function renderReview() {
@@ -976,8 +1084,9 @@
         <button type="button" data-action="rev-filter" data-filter="visit" class="${S.reviewFilter === "visit" ? "on" : ""}">מהסיור</button>
         <button type="button" data-action="rev-filter" data-filter="import" class="${S.reviewFilter === "import" ? "on" : ""}">מהקובץ</button>
         <button type="button" data-action="rev-filter" data-filter="valuation" class="${S.reviewFilter === "valuation" ? "on" : ""}">שווי</button>
+        <button type="button" data-action="rev-filter" data-filter="machine" class="${S.reviewFilter === "machine" ? "on" : ""}">מכונות</button>
       </div>
-      <p class="hint">כאן שאלות על תג לא חד-משמעי, אזור סותר, תג כפול, פריט בלי התאמה, שלט לא קריא, או קשר לא ברור.</p>
+      <p class="hint">כאן שאלות על תג לא קריא, התאמה לא ברורה, קיבוץ לא ודאי, תיאור סותר, או גבול של יחידת מכירה. העלאה נוספת לא מחכה שהשאלה תיסגר.</p>
       ${items.filter((review) => review.status !== "resolved").map((review) => `
         <button class="card" type="button" data-action="open-review" data-id="${esc(review.id)}" style="width:100%;text-align:right">
           <b>${esc(review.question)}</b>
@@ -985,11 +1094,30 @@
         </button>`).join("") || `<p class="hint">אין שאלות פתוחות בקבוצה הזו.</p>`}`;
   }
 
+  function reviewPhotoList(review) {
+    const ids = new Set();
+    const list = [];
+    photosOf(review.capture_id || "").forEach((photo) => {
+      if (ids.has(photo.id)) return;
+      ids.add(photo.id);
+      list.push(photo);
+    });
+    ((review.payload || {}).photo_ids || []).forEach((id) => {
+      if (ids.has(id)) return;
+      ids.add(id);
+      list.push(S.photos[id] || { id });
+    });
+    return list;
+  }
+
   function renderReviewDetail(review) {
     const cap = review.capture_id ? S.captures[review.capture_id] : null;
-    const photos = review.capture_id ? photosOf(review.capture_id) : [];
+    const photos = reviewPhotoList(review);
     const rowIds = review.row_ids || [];
     const rows = rowIds.map((id) => S.rowById[id]).filter(Boolean);
+    const payload = review.payload || {};
+    const members = payload.members || [];
+    const machine = payload.machine_id ? (S.machines || []).find((item) => item.id === payload.machine_id) : null;
     const valueLink = review.queue === "valuation" && rowIds[0] ? `<p><a href="#/value/row/${esc(rowIds[0])}">פתחו את כרטיס השווי כדי לענות. תשובה כאן לא מייצרת מחיר.</a></p>` : "";
     return `
       <button class="btn-quiet" type="button" data-action="close-review">חזרה</button>
@@ -997,22 +1125,27 @@
         <div class="card">
           <h2>השאלה</h2>
           <p>${esc(review.question)}</p>
+          ${payload.resolve_by ? `<p class="hint">מה סוגר את השאלה: ${esc(payload.resolve_by)}</p>` : ""}
           ${valueLink}
           ${review.missing_reason ? `<div class="warn">${esc(review.missing_reason)}</div>` : ""}
+          ${review.resolution ? `<p class="hint">תשובה שנשמרה: ${esc(review.resolution)}</p>` : ""}
           ${cap ? `<p class="hint">אזור שנצפה: ${ltr(cap.observed_area_name || "לא ידוע")} · תג שהוקלד: ${ltr(cap.tag_text || "")}</p><p>${esc(cap.note || "")}</p>` : ""}
-          ${photos.map((photo) => `<img src="${esc(photo.url || `/api/photos/${photo.id}/thumb`)}" alt="צילום" style="width:100%;border-radius:12px;margin:6px 0">`).join("") || `<p class="hint">אין צילום לשאלה הזו.</p>`}
+          ${photos.map((photo) => `<figure><img src="${esc(photo.url || `/api/photos/${photo.id}/thumb`)}" alt="צילום" style="width:100%;border-radius:12px"><figcaption class="hint">${esc(photoSubject(photo))}</figcaption></figure>`).join("") || `<p class="hint">אין צילום לשאלה הזו. אפשר להעלות אחד בלי לסגור את השאלה.</p>`}
+          <label class="btn file-btn">הוסף צילום או קובץ<input type="file" accept="image/*,.pdf,.txt,.docx" data-action="review-photo" data-id="${esc(review.id)}"></label>
         </div>
         <div class="card">
-          <h2>שורות אפשריות</h2>
-          ${rows.map((row) => `<label class="suggest"><input type="checkbox" data-review-row="${esc(row.id)}"> ${ltr(row.tag_original)} ${esc(row.description)}<div class="hint">${esc(row.sheet_name)} שורה ${esc(row.original_row)} · ${ltr(row.listed_area || "לא ידוע")}</div></label>`).join("") || `<p class="hint">אין שורת מועמדת. אפשר להשאיר בלי התאמה.</p>`}
+          <h2>שורות אקסל</h2>
+          ${members.map((member) => `<div class="suggest"><b>${member.role === "parent" ? "הורה" : "רכיב"}: ${ltr(member.tag)}</b><div class="hint">${esc(member.evidence || "")}</div>${member.row_id && S.rowById[member.row_id] ? `<div class="hint">${esc(S.rowById[member.row_id].sheet_name)} שורה ${esc(S.rowById[member.row_id].original_row)} · ${esc(S.rowById[member.row_id].description || "")}</div>` : ""}</div>`).join("")}
+          ${rows.map((row) => `<label class="suggest"><input type="checkbox" data-review-row="${esc(row.id)}"> ${ltr(row.tag_original)} ${esc(row.description)}<div class="hint">${esc(row.sheet_name)} שורה ${esc(row.original_row)} · אזור שרשום במלאי ${ltr(row.listed_area || "לא ידוע")}</div></label>`).join("") || (members.length ? "" : `<p class="hint">אין שורת מועמדת. אפשר להשאיר בלי התאמה.</p>`)}
+          ${(payload.suggestions || []).filter((item) => !rows.some((row) => row.id === item.row_id)).map((item) => `<div class="hint">${ltr(item.tag || "")} · ${esc(item.why || "")}</div>`).join("")}
+          ${machine ? `<h3>היחידה</h3><p>${esc(machine.name)} · ${esc(machineStatusText(machine))}</p>${machineControls(machine)}` : ""}
           <textarea id="review-text" placeholder="תשובה כתובה, אם צריך"></textarea>
           <div class="actions">
             <button class="btn-primary" type="button" data-action="review-link" data-id="${esc(review.id)}">קשר</button>
             <button class="btn" type="button" data-action="review-separate" data-id="${esc(review.id)}">השאר נפרד</button>
-            <button class="btn" type="button" data-action="review-resolve" data-id="${esc(review.id)}">סגור עם התשובה</button>
+            <button class="btn" type="button" data-action="review-resolve" data-id="${esc(review.id)}">שמור תשובה</button>
             <button class="btn" type="button" data-action="review-defer" data-id="${esc(review.id)}">דחה</button>
           </div>
-          ${cap ? `<label class="btn file-btn">הוסף צילום<input type="file" accept="image/*" data-action="review-photo" data-id="${esc(review.id)}"></label>` : ""}
         </div>
       </div>`;
   }
@@ -1381,6 +1514,7 @@
     else if (S.screen === "value-detail") body = renderValueDetail();
     else if (S.screen === "comparables") body = renderComparables();
     else if (S.screen === "visit-prep") body = renderVisitPrep();
+    else if (S.screen === "machines") body = renderMachines();
     $(shell(body));
   }
 
@@ -1551,8 +1685,50 @@
       const result = await response.json();
       if (result.missing) S.error = result.missing;
       else S.error = "";
+      if (result.message) S.toast = result.message;
       await refreshFromServer().catch(() => {});
       if (result.status === "resolved") S.activeReview = null;
+      render();
+    }
+    if (action === "open-machine") {
+      S.openMachine = target.dataset.id;
+      S.screen = "machines";
+      location.hash = "#/machines";
+      render();
+    }
+    if (action === "machine-filter") {
+      S.machineFilter = target.dataset.filter;
+      render();
+    }
+    if (action === "machine-act") {
+      const id = target.dataset.id;
+      const act = target.dataset.machineAct;
+      const body = { action: act };
+      if (act === "split") {
+        body.tag_norms = [...document.querySelectorAll(`[data-machine-tag][data-machine="${id}"]:checked`)].map((box) => box.dataset.machineTag);
+      }
+      if (act === "combine") {
+        const field = document.getElementById("machine-add-" + id);
+        body.tag_norms = [field ? field.value.trim() : ""];
+      }
+      if (act === "correct") {
+        const field = document.getElementById("machine-name-" + id);
+        body.name = field ? field.value.trim() : "";
+      }
+      const response = await fetch(`/api/machines/${id}/action`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) S.error = result.detail || "הפעולה לא נשמרה.";
+      else {
+        S.error = "";
+        S.toast = "היחידה עודכנה. שורות האקסל נשארו.";
+        S.openMachine = id;
+      }
+      await refreshFromServer().catch(() => {});
       render();
     }
     if (action === "shows-general") {
@@ -1656,8 +1832,13 @@
       const form = new FormData();
       form.append("file", target.files[0]);
       const response = await fetch(`/api/review/${target.dataset.id}/photo`, { method: "POST", body: form, credentials: "include" });
-      const result = await response.json();
-      S.error = result.message || "";
+      const result = await response.json().catch(() => ({}));
+      if (result.ok) {
+        S.toast = result.message || "הקובץ נשמר. השאלה נשארת פתוחה.";
+        S.error = "";
+      } else {
+        S.error = result.message || result.detail || "הקובץ לא נשמר.";
+      }
       await refreshFromServer().catch(() => {});
       render();
     }
@@ -1666,6 +1847,19 @@
   document.getElementById("app").addEventListener("input", async (event) => {
     const target = event.target;
     const cap = S.captures[S.openCaptureId];
+    if (target.dataset.action === "machine-search") {
+      S.machineQuery = target.value;
+      const selectionStart = target.selectionStart;
+      const value = target.value;
+      render();
+      const again = document.querySelector("[data-action=machine-search]");
+      if (again) {
+        again.focus();
+        again.value = value;
+        if (again.setSelectionRange) again.setSelectionRange(selectionStart, selectionStart);
+      }
+      return;
+    }
     if (!cap) {
       if (target.dataset.action === "inv-search") restoreSearch(target);
       return;
@@ -1840,6 +2034,7 @@
     else if (hash.startsWith("#/value")) S.screen = "value";
     else if (hash.startsWith("#/comparables")) S.screen = "comparables";
     else if (hash.startsWith("#/visit-prep")) S.screen = "visit-prep";
+    else if (hash.startsWith("#/machines")) S.screen = "machines";
     else S.screen = "capture";
     if (S.screen === "value") loadValue();
     if (S.screen === "value-detail") loadValueDetail(hash.split("/")[3]);

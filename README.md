@@ -57,6 +57,18 @@ python3 -m pytest tests -q
 5. Tap **שמור ועבור לפריט הבא**.
 6. Use **מלאי** to open a row, **בדיקה** for open questions, and **סיכום** for counts and the export.
 
+## Photos, tags, and machines
+
+Photos upload from **קליטה** immediately: the camera button, the file button, or a drop. No area, asset, or system has to be selected first, and an open question does not block the next upload. The area selector still applies only when you start a one-item capture and tap **צרף לקליטה הזו**.
+
+A tag prefix is a category only, read without regard to case. The original tag text is kept. `R` reactor, `A` agitator or mixer, `P` pump, `F` filter, `D` dryer, `H` heat exchanger, `HVAC` or `AHU` air handling unit, `B` blower, `C` distillation or absorption column, `E` general equipment, `W` weighing equipment, `T` tank, `X` an additional unit that typically includes a compressor, including heating and cooling. The prefix does not identify the asset or its parent.
+
+A clear tag or nameplate files the photo onto that inventory row and, when that row belongs to a machine, shows it inside the parent as a photo of that component. A photo of `F-4208` is not labeled as a photo of `R-4208`. Several clear tags on one photo link to each of those rows. An area stored on the matched inventory row is shown as the area recorded in the inventory, not as a location verified from the photo. An unreadable tag, an ambiguous match, or text that does not identify a row stays unmatched, with the possible rows and a review task.
+
+Machines are built from item names, tag prefixes, shared numbers, descriptions, and explicit references. A shared number alone does not create a machine. The user confirmed that `R-4208` and `F-4208` are one machine and are sold together; that pair is stored as confirmed by the user. Those tags are not in the loaded spreadsheet, so no inventory row was created for them. A similar explicit mention in a description becomes a proposed machine, with a clarification task when the boundary or the sale unit is still open. Confirmed and proposed stay distinct. Each component keeps its Excel row, tag, description, and source. Confirming, renaming, splitting, combining, or dissolving a machine does not delete those rows or add a second inventory value or a second sale commitment.
+
+Open questions are on **בדיקה**, including the **מכונות** filter: unreadable tags, ambiguous matches, uncertain groupings, conflicting descriptions, and unclear sale-unit boundaries. A task shows the photos, the Excel rows, the question, and what would resolve it. An answer or an added file updates the affected record and leaves the task open until the boundary is actually confirmed or dissolved.
+
 ## Tour files
 
 On **קליטה**, drop a group of photos and documents onto the screen, or choose several files together. There is no folder picker, no rename step, and no need to type an asset id. The area selector is not used for that upload: the observed area stays unknown unless the file itself names an area (for example `אזור: 07`) or the file is the single file attached to a capture that is already clearly linked.

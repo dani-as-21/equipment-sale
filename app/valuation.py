@@ -1530,11 +1530,17 @@ def overview(conn, *, area: str = "", family: str = "", info: str = "", q: str =
             continue
         if info and preview["info_readiness"] != info:
             continue
-        items.append({key: preview[key] for key in (
+        from app.machines import sale_note_for_row
+
+        sale_note = sale_note_for_row(conn, row["id"])
+        item = {key: preview[key] for key in (
             "row_id", "tag", "description", "sheet_name", "original_row", "listed_area", "family",
             "family_label", "info_readiness", "info_label", "market_readiness", "market_label",
             "blocking", "next_action", "latest_range", "latest_date",
-        )})
+        )}
+        if sale_note:
+            item["sale_unit"] = sale_note
+        items.append(item)
     total = len(items)
     window = items[offset:offset + limit]
     return {
