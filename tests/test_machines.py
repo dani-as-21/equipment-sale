@@ -181,7 +181,7 @@ def test_answer_split_and_sale_keep_the_excel_rows(client):
     overview = client.get("/api/valuation/overview", params={"q": "A-707"}).json()
     item = next(row for row in overview["items"] if row["tag"] == "A-707")
     assert "יחידת המכירה" in item["sale_unit"]
-    assert not item.get("latest_range")
+    assert item.get("latest_range") in (None, "", "אין די ראיות להערכה")
     assert "777001" not in json.dumps(item)
 
     split = client.post(f"/api/machines/{machine['id']}/action", json={"action": "split", "tag_norms": ["A-707"]})

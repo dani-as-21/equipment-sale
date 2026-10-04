@@ -752,6 +752,96 @@ def create_app() -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    @app.post("/api/intake")
+    async def intake_upload(request: Request, conn=Depends(get_conn)):
+        require_user(request)
+        form = await request.form()
+        uploads = [item for item in form.getlist("files") if hasattr(item, "read")]
+        if not uploads:
+            raise HTTPException(status_code=400, detail="לא נבחרו מסמכים.")
+        from app import intake
+
+        settings = get_settings()
+        created = logic.now_iso()
+        results = []
+        for upload in uploads:
+            data = await upload.read()
+            name = getattr(upload, "filename", None) or "document"
+            if len(data) > 25 * 1024 * 1024:
+                results.append({"saved": False, "duplicate": False, "status": "failed", "message": "הקובץ גדול מדי ולא נשמר.", "document": None})
+                continue
+            try:
+                results.append(intake.ingest_file(conn, original_name=name, data=data, photo_dir=settings.photo_dir, created_at=created))
+            except Exception:
+                results.append({"saved": False, "duplicate": False, "status": "failed", "message": "הקובץ לא נשמר.", "document": None, "original_name": name})
+        return {"results": results}
+
+    @app.get("/api/intake")
+    def intake_list(request: Request, conn=Depends(get_conn), status: str = ""):
+        require_user(request)
+        from app import intake
+
+        return {"documents": intake.list_documents(conn, status), "statuses": intake.STATUS_LABELS}
+
+    @app.get("/api/intake/{document_id}")
+    def intake_one(document_id: str, request: Request, conn=Depends(get_conn)):
+        require_user(request)
+        from app import intake
+
+        try:
+            return intake._public_document(conn, document_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/api/intake/{document_id}/file")
+    def intake_file(document_id: str, request: Request, conn=Depends(get_conn)):
+        require_user(request)
+        row = conn.execute("SELECT stored_path, original_name FROM intake_documents WHERE id = ?", (document_id,)).fetchone()
+        if not row or not row["stored_path"] or not Path(row["stored_path"]).exists():
+            raise HTTPException(status_code=404, detail="הקובץ לא נמצא.")
+        return FileResponse(row["stored_path"], filename=row["original_name"])
+
+    @app.post("/api/intake/{document_id}/type")
+    def intake_type(document_id: str, request: Request, body: dict, conn=Depends(get_conn)):
+        require_user(request)
+        from app import intake
+
+        try:
+            return intake.set_type(conn, document_id, body.get("doc_type") or "", logic.now_iso())
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/intake/{document_id}/links")
+    def intake_links(document_id: str, request: Request, body: dict, conn=Depends(get_conn)):
+        require_user(request)
+        from app import intake
+
+        try:
+            return intake.set_links(conn, document_id, body, logic.now_iso())
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/offers")
+    def offers_list(request: Request, conn=Depends(get_conn)):
+        require_user(request)
+        from app import intake
+
+        return {"offers": intake.list_offers(conn)}
+
+    @app.get("/api/offers/{offer_id}")
+    def offers_one(offer_id: str, request: Request, conn=Depends(get_conn)):
+        require_user(request)
+        from app import intake
+
+        try:
+            return intake._public_offer(conn, offer_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
     @app.get("/api/commercial/{row_id}")
     def commercial_get(row_id: str, request: Request, conn=Depends(get_conn)):
         require_user(request)

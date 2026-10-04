@@ -312,7 +312,99 @@ CREATE TABLE IF NOT EXISTS machine_members (
   UNIQUE(machine_id, tag_norm)
 );
 
+CREATE TABLE IF NOT EXISTS intake_documents (
+  id TEXT PRIMARY KEY,
+  sha256 TEXT NOT NULL UNIQUE,
+  original_name TEXT NOT NULL,
+  stored_path TEXT NOT NULL,
+  media_kind TEXT NOT NULL,
+  extracted_text TEXT,
+  extraction_note TEXT,
+  doc_type TEXT NOT NULL,
+  type_confidence TEXT NOT NULL,
+  classification_reason TEXT,
+  summary_json TEXT NOT NULL,
+  status TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS intake_links (
+  id TEXT PRIMARY KEY,
+  document_id TEXT NOT NULL,
+  inventory_row_id TEXT,
+  tag_norm TEXT NOT NULL,
+  link_status TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  UNIQUE(document_id, tag_norm, inventory_row_id)
+);
+
+CREATE TABLE IF NOT EXISTS intake_facts (
+  id TEXT PRIMARY KEY,
+  document_id TEXT NOT NULL,
+  inventory_row_id TEXT,
+  tag_norm TEXT NOT NULL,
+  fact_key TEXT NOT NULL,
+  fact_text TEXT NOT NULL,
+  source_ref TEXT NOT NULL,
+  conflict_with TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS purchase_offers (
+  id TEXT PRIMARY KEY,
+  family_id TEXT NOT NULL,
+  version_no INTEGER NOT NULL,
+  document_id TEXT NOT NULL UNIQUE,
+  buyer TEXT,
+  contacts TEXT,
+  offer_date TEXT,
+  expiry TEXT,
+  price_basis TEXT NOT NULL,
+  amount REAL,
+  currency TEXT,
+  vat TEXT,
+  payment_terms TEXT,
+  inspection TEXT,
+  contingencies TEXT,
+  dismantling TEXT,
+  loading TEXT,
+  transport TEXT,
+  removal_date TEXT,
+  exclusions TEXT,
+  missing_terms_json TEXT NOT NULL,
+  supersedes_id TEXT,
+  assessment_json TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS offer_assets (
+  id TEXT PRIMARY KEY,
+  offer_id TEXT NOT NULL,
+  inventory_row_id TEXT,
+  tag_norm TEXT NOT NULL,
+  tag_original TEXT NOT NULL,
+  role TEXT NOT NULL,
+  quantity TEXT,
+  UNIQUE(offer_id, tag_norm, role)
+);
+
+CREATE TABLE IF NOT EXISTS service_quotes (
+  id TEXT PRIMARY KEY,
+  document_id TEXT NOT NULL UNIQUE,
+  supplier TEXT,
+  service_kind TEXT,
+  amount REAL,
+  currency TEXT,
+  scope_text TEXT,
+  created_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_rows_tag ON inventory_rows(tag_norm);
+CREATE INDEX IF NOT EXISTS idx_intake_status ON intake_documents(status);
+CREATE INDEX IF NOT EXISTS idx_intake_links_row ON intake_links(inventory_row_id);
+CREATE INDEX IF NOT EXISTS idx_offer_family ON purchase_offers(family_id);
+CREATE INDEX IF NOT EXISTS idx_offer_assets_row ON offer_assets(inventory_row_id);
 CREATE INDEX IF NOT EXISTS idx_machine_members_tag ON machine_members(tag_norm);
 CREATE INDEX IF NOT EXISTS idx_machine_members_row ON machine_members(inventory_row_id);
 CREATE INDEX IF NOT EXISTS idx_rows_kind ON inventory_rows(kind);

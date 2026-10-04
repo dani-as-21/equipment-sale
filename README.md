@@ -69,6 +69,16 @@ Machines are built from item names, tag prefixes, shared numbers, descriptions, 
 
 Open questions are on **בדיקה**, including the **מכונות** filter: unreadable tags, ambiguous matches, uncertain groupings, conflicting descriptions, and unclear sale-unit boundaries. A task shows the photos, the Excel rows, the question, and what would resolve it. An answer or an added file updates the affected record and leaves the task open until the boundary is actually confirmed or dissolved.
 
+## Incoming documents
+
+**מסמכים** is a separate upload from the photo capture on **קליטה**. PDFs, spreadsheets, Word files, images, and screenshots can be uploaded without choosing a type or an asset first.
+
+Each file is classified as equipment information, a purchase offer (possible proceeds), a service quotation (possible cost), appraisal or market evidence, or mixed/unclear. An uncertain type becomes a question. After processing, the screen shows a Hebrew summary: what the file is, who issued it and the date when those are written, the assets, amounts, conditions, deadlines, exclusions, what was added, what is unclear, and the next action, with the page, paragraph, or spreadsheet row.
+
+Equipment facts are filed only onto rows the text actually identifies. A fact about one component is not copied to the other components in its machine. Conflicts are kept and opened as a task. An uncertain tag stays a candidate. No new asset is created because the wording differs. The same file bytes are not ingested twice.
+
+A purchase offer keeps buyer, dates, scope, price basis, amount, currency, VAT, terms, and exclusions when they are written. A later document is a new version. It does not delete the previous version, and it does not cancel it unless the text says so. Offers are on **הצעות** and on the linked equipment. The offer is compared with an evidence-backed range for the same assets. It does not set that range. A package is not split across components and is not compared by adding component values. Unknown seller costs stay unknown. Being inside the range is not a recommendation to accept, and the app does not accept, reject, or contact anyone.
+
 ## Tour files
 
 On **קליטה**, drop a group of photos and documents onto the screen, or choose several files together. There is no folder picker, no rename step, and no need to type an asset id. The area selector is not used for that upload: the observed area stays unknown unless the file itself names an area (for example `אזור: 07`) or the file is the single file attached to a capture that is already clearly linked.

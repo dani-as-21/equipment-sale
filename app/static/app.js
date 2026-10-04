@@ -44,6 +44,11 @@
     machineQuery: "",
     machineFilter: "active",
     openMachine: null,
+    documents: [],
+    offers: [],
+    docFilter: "",
+    activeDocument: null,
+    intakeResults: [],
   };
 
   const STATUS_HE = {
@@ -140,6 +145,8 @@
     else if (location.hash.startsWith("#/comparables")) S.screen = "comparables";
     else if (location.hash.startsWith("#/visit-prep")) S.screen = "visit-prep";
     else if (location.hash.startsWith("#/machines")) S.screen = "machines";
+    else if (location.hash.startsWith("#/offers")) S.screen = "offers";
+    else if (location.hash.startsWith("#/documents")) S.screen = "documents";
     else S.screen = "capture";
     try {
       await Store.openDb();
@@ -584,6 +591,7 @@
         <button type="button" data-go="machines" class="${S.screen === "machines" ? "active" : ""}">מכונות</button>
         <button type="button" data-go="review" class="${S.screen === "review" ? "active" : ""}">בדיקה${openReviews ? " (" + openReviews + ")" : ""}</button>
         <button type="button" data-go="visit" class="${S.screen === "visit" ? "active" : ""}">סיכום</button>
+        <button type="button" data-go="documents" class="${S.screen === "documents" || S.screen === "offers" ? "active" : ""}">מסמכים</button>
         <button type="button" data-go="value" class="${S.screen === "value" || S.screen === "value-detail" ? "active" : ""}">שווי</button>
       </nav>`;
   }
@@ -801,7 +809,7 @@
           <button class="btn-primary" type="button" data-action="new-capture">ציוד חדש</button>
         </div>
         ${recent.map(miniCapture).join("")}
-        <p class="hint"><a href="#/ready">בדיקת מוכנות לפני הסיור</a> · <a href="#/import">קבצי המלאי</a></p>`;
+        <p class="hint"><a href="#/ready">בדיקת מוכנות לפני הסיור</a> · <a href="#/import">קבצי המלאי</a> · <a href="#/documents">מסמכים נכנסים</a></p>`;
     }
     const photos = photosOf(cap.id);
     const thumbs = photos.map((photo) => {
@@ -972,7 +980,8 @@
           ${flag.identity === "user_confirmed" ? `<span class="chip ok">אושר ידנית</span>` : ""}
           ${(row.labels || []).map((label) => `<span class="chip warn">${esc(label)}</span>`).join("")}
         </div>
-        <p><a href="#/value/row/${esc(row.id)}">כרטיס שווי של השורה הזו</a></p>
+        <p><a href="#/value/row/${esc(row.id)}">כרטיס שווי של השורה הזו</a> · <a href="#/documents">מסמכים</a> · <a href="#/offers">הצעות</a></p>
+        ${rowDocumentsHtml(row)}
         <p class="hint">השווי נשען על אותה שורה ועל אותם צילומים. עובדה שכבר בקובץ לא מוקלדת מחדש.</p>
         ${row.prefix_category ? `<p><b>קטגוריה לפי הקידומת:</b> ${esc(row.prefix_category)}. הקידומת אינה מזהה את המכונה.</p>` : ""}
         ${machineLinksHtml(row)}
@@ -1085,6 +1094,7 @@
         <button type="button" data-action="rev-filter" data-filter="import" class="${S.reviewFilter === "import" ? "on" : ""}">מהקובץ</button>
         <button type="button" data-action="rev-filter" data-filter="valuation" class="${S.reviewFilter === "valuation" ? "on" : ""}">שווי</button>
         <button type="button" data-action="rev-filter" data-filter="machine" class="${S.reviewFilter === "machine" ? "on" : ""}">מכונות</button>
+        <button type="button" data-action="rev-filter" data-filter="intake" class="${S.reviewFilter === "intake" ? "on" : ""}">מסמכים</button>
       </div>
       <p class="hint">כאן שאלות על תג לא קריא, התאמה לא ברורה, קיבוץ לא ודאי, תיאור סותר, או גבול של יחידת מכירה. העלאה נוספת לא מחכה שהשאלה תיסגר.</p>
       ${items.filter((review) => review.status !== "resolved").map((review) => `
@@ -1497,6 +1507,152 @@
         </div>`).join("") || `<p class="hint">עוד אין שאלות. פותחים כרטיס שווי, והחסר המהותי מופיע כאן.</p>`}`;
   }
 
+  function rowDocumentsHtml(row) {
+    const docs = (S.documents || []).filter((doc) => (doc.links || []).some((link) => link.inventory_row_id === row.id && link.link_status === "confirmed"));
+    const offers = (S.offers || []).filter((offer) => (offer.assets || []).some((asset) => asset.inventory_row_id === row.id && asset.role === "included"));
+    if (!docs.length && !offers.length) return "";
+    return `<div class="card"><h3>מסמכים והצעות לפריט הזה</h3>
+      ${docs.map((doc) => `<p><button type="button" class="btn" data-action="open-document" data-id="${esc(doc.id)}">${esc(doc.original_name)}</button> <span class="hint">${esc(doc.type_label)}</span></p>`).join("")}
+      ${offers.map((offer) => `<p><button type="button" class="btn" data-action="open-offer" data-id="${esc(offer.id)}">${esc(offer.buyer || "הצעה")} · גרסה ${esc(offer.version_no)}</button></p>`).join("")}
+      <p class="hint">עובדה שנקראה על הרכיב הזה לא הועתקה לשאר הרכיבים במכונה.</p></div>`;
+  }
+
+  const DOC_FILTERS = [
+    ["", "הכל"],
+    ["filed", "עובד ושויך"],
+    ["awaiting_match", "ממתין לשיוך"],
+    ["awaiting_clarification", "ממתין להבהרה"],
+    ["offer_awaiting_valuation", "הצעה ממתינה לשווי"],
+    ["offer_ready", "הצעה לבדיקה"],
+    ["failed", "נכשל"],
+  ];
+  const DOC_TYPES = [
+    ["equipment", "מידע על ציוד"],
+    ["offer", "הצעת רכש"],
+    ["service_quote", "הצעת שירות"],
+    ["appraisal", "ראיית שווי"],
+    ["unclear", "לא ברור"],
+  ];
+
+  function renderDocuments() {
+    if (S.activeDocument) {
+      const doc = (S.documents || []).find((item) => item.id === S.activeDocument);
+      if (doc) return renderDocumentDetail(doc);
+    }
+    const docs = (S.documents || []).filter((doc) => !S.docFilter || doc.status === S.docFilter);
+    const results = (S.intakeResults || []).map((item) => `
+      <div class="tour-file" data-intake-status="${esc(item.status || "")}" data-saved="${item.saved ? "yes" : "no"}">
+        <b>${ltr((item.document && item.document.original_name) || "מסמך")}</b>
+        <div class="${item.saved ? "ok" : "error"}">${item.duplicate ? "כבר נקלט, בלי כפילות" : item.saved ? "נקלט" : "לא נשמר"}</div>
+        <div>${esc(item.message || "")}</div>
+      </div>`).join("");
+    return `
+      <div class="card">
+        <h2>מסמכים נכנסים</h2>
+        <p>העלו PDF, גיליון, וורד, תמונה או צילום מסך. בלי לסווג ובלי לבחור ציוד קודם. קליטת הצילומים בסיור נשארת במסך הקליטה.</p>
+        <label class="btn file-btn">העלאת מסמכים<input type="file" data-action="intake-files" multiple accept=".pdf,.doc,.docx,.xls,.xlsx,.csv,.txt,.rtf,image/*"></label>
+        <p><button type="button" class="btn" data-go="offers">הצעות רכש</button></p>
+        ${results}
+      </div>
+      <div class="filters">
+        ${DOC_FILTERS.map(([id, label]) => `<button type="button" data-action="doc-filter" data-filter="${id}" class="${S.docFilter === id ? "on" : ""}">${label}</button>`).join("")}
+      </div>
+      ${docs.map((doc) => `<button class="card" type="button" data-action="open-document" data-id="${esc(doc.id)}" style="width:100%;text-align:right">
+        <b>${ltr(doc.original_name)}</b>
+        <div class="hint">${esc(doc.type_label)} · ${esc(doc.status_label)}</div>
+        <div>${esc((doc.summary && doc.summary.text) || "")}</div>
+      </button>`).join("") || `<p class="hint">עדיין אין מסמכים במסנן הזה.</p>`}`;
+  }
+
+  function renderDocumentDetail(doc) {
+    const summary = doc.summary || {};
+    const links = doc.links || [];
+    return `
+      <button class="btn-quiet" type="button" data-action="close-document">חזרה</button>
+      <div class="card">
+        <h2>${ltr(doc.original_name)}</h2>
+        <p>${esc(summary.what || doc.type_label)} · ${esc(doc.status_label)}</p>
+        <p>${esc(summary.text || "")}</p>
+        ${summary.issuer || summary.date ? `<p>מוציא: ${esc(summary.issuer || "לא צוין")}. תאריך: ${ltr(summary.date || "לא צוין")}.</p>` : ""}
+        ${summary.unprocessed ? `<div class="warn">${esc(summary.unprocessed)}</div>` : ""}
+        ${(summary.sources || []).map((source) => `<p class="hint">${esc(source.ref)}: ${esc(source.note || "")}</p>`).join("")}
+        <p><a href="/api/intake/${esc(doc.id)}/file">הקובץ המקורי</a></p>
+      </div>
+      <div class="card">
+        <h3>שיוך</h3>
+        <p class="hint">עובדה נשמרת רק על הפריט שזוהה. היא לא מועתקת לכל רכיב במכונה.</p>
+        ${links.map((link) => `<p>${ltr(link.tag_norm)} · ${esc(link.link_status)} · ${esc(link.reason || "")}
+          ${link.link_status === "confirmed" ? `<button type="button" class="btn" data-action="intake-unlink" data-id="${esc(doc.id)}" data-row="${esc(link.inventory_row_id || "")}">הסר שיוך</button>` : `<button type="button" class="btn" data-action="intake-link" data-id="${esc(doc.id)}" data-row="${esc(link.inventory_row_id || "")}">שייך</button>`}
+        </p>`).join("") || `<p class="hint">אין שיוך.</p>`}
+        ${(doc.facts || []).map((fact) => `<p class="hint">${esc(fact.source_ref)} · ${esc(fact.fact_key)}: ${esc(fact.fact_text)}${fact.conflict_with ? " · נשמרה סתירה" : ""}</p>`).join("")}
+      </div>
+      <div class="card">
+        <h3>תיקון סוג</h3>
+        <div class="actions">
+          ${DOC_TYPES.map(([id, label]) => `<button type="button" class="btn${doc.doc_type === id ? " btn-primary" : ""}" data-action="intake-type" data-id="${esc(doc.id)}" data-type="${id}">${label}</button>`).join("")}
+        </div>
+      </div>`;
+  }
+
+  function renderOffers() {
+    const offers = S.offers || [];
+    if (!offers.length) return `<div class="card"><h2>הצעות רכש</h2><p class="hint">עדיין אין הצעות. מעלים אותן במסמכים הנכנסים.</p><button class="btn" type="button" data-go="documents">אל המסמכים</button></div>`;
+    return `
+      <button class="btn-quiet" type="button" data-go="documents">אל המסמכים</button>
+      <div class="card"><h2>הצעות רכש</h2><p class="hint">הצעה היא תמורה אפשרית. היא לא קובעת את השווי, ובתוך הטווח אינו המלצה לקבל. גרסה חדשה לא מוחקת את הקודמת.</p></div>
+      ${offers.map((offer) => {
+        const assessment = offer.assessment || {};
+        const recommendation = assessment.recommendation || {};
+        const range = assessment.range || {};
+        return `<article class="card" id="offer-${esc(offer.id)}">
+          <h3>${esc(offer.buyer || "קונה לא צוין")} · גרסה ${esc(offer.version_no)}</h3>
+          <p>${offer.amount != null ? ltr(offer.amount + " " + (offer.currency || "")) : "סכום לא נקבע"} · ${esc(offer.price_basis)} · מע״מ: ${esc(offer.vat)}</p>
+          <p class="hint">תאריך ${ltr(offer.offer_date || "לא צוין")} · תוקף ${ltr(offer.expiry || "לא צוין")}</p>
+          <p>פריטים: ${(offer.assets || []).map((asset) => `${ltr(asset.tag_original)} (${esc(asset.role)})`).join(", ") || "לא זוהו"}</p>
+          ${offer.exclusions ? `<p>החרגות: ${esc(offer.exclusions)}</p>` : ""}
+          <p>${esc(assessment.conclusion || "")}</p>
+          ${range.range_label ? `<p class="hint">טווח: ${ltr(range.range_label)} · ${ltr((range.created_at || "").slice(0, 10))} · ביטחון: ${esc(range.confidence || "")}</p>` : ""}
+          <p class="hint">${esc(assessment.confidence_why || "")}</p>
+          ${(assessment.differences || []).map((item) => `<p class="hint">${esc(item)}</p>`).join("")}
+          <p>${esc(assessment.net_note || "")}</p>
+          <p><b>הצעד המומלץ:</b> ${esc(recommendation.label || "")}</p>
+          <p class="hint">${esc(recommendation.separated || "")}</p>
+          <p class="hint">גרסאות: ${(offer.versions || []).map((item) => `#${esc(item.version_no)} ${item.amount != null ? ltr(item.amount) : ""}`).join(" · ")}</p>
+          ${offer.supersedes_id ? `<p class="hint">המסמך אומר שהגרסה הזו מחליפה גרסה קודמת.</p>` : ""}
+        </article>`;
+      }).join("")}`;
+  }
+
+  async function uploadIntake(fileList) {
+    const files = await filesFromList(fileList);
+    if (!files.length) return;
+    S.screen = "documents";
+    location.hash = "#/documents";
+    const form = new FormData();
+    files.forEach((file) => form.append("files", file, file.name || "document"));
+    const response = await fetch("/api/intake", { method: "POST", body: form, credentials: "include" });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      S.error = body.detail || "המסמכים לא נשמרו.";
+      S.intakeResults = [];
+    } else {
+      S.error = "";
+      S.intakeResults = body.results || [];
+      S.toast = "הקליטה הסתיימה. הסיכום מופיע למטה.";
+    }
+    await loadIntake();
+  }
+
+  async function loadIntake() {
+    const [docs, offers] = await Promise.all([
+      fetch("/api/intake", { credentials: "include" }),
+      fetch("/api/offers", { credentials: "include" }),
+    ]);
+    if (docs.ok) S.documents = (await docs.json()).documents || [];
+    if (offers.ok) S.offers = (await offers.json()).offers || [];
+    render();
+  }
+
   function render() {
     if (!S.authed) {
       $(`<form class="card login" data-action="login"><h1>סיור ציוד</h1><p class="hint">כניסה מקומית לפני הסיור.</p>${S.error ? `<div class="error">${esc(S.error)}</div>` : ""}<label>סיסמה<input type="password" name="password" autocomplete="current-password"></label><button class="btn-primary" type="submit">כניסה</button></form>`);
@@ -1515,6 +1671,8 @@
     else if (S.screen === "comparables") body = renderComparables();
     else if (S.screen === "visit-prep") body = renderVisitPrep();
     else if (S.screen === "machines") body = renderMachines();
+    else if (S.screen === "documents") body = renderDocuments();
+    else if (S.screen === "offers") body = renderOffers();
     $(shell(body));
   }
 
@@ -1529,6 +1687,7 @@
     if (!changing && screen === "value") loadValue();
     if (!changing && screen === "comparables") loadComparables();
     if (!changing && screen === "visit-prep") loadVisitPrep();
+    if (screen === "documents" || screen === "offers") loadIntake();
     if (!changing) render();
   }
 
@@ -1700,6 +1859,50 @@
       S.machineFilter = target.dataset.filter;
       render();
     }
+    if (action === "doc-filter") {
+      S.docFilter = target.dataset.filter;
+      S.activeDocument = null;
+      render();
+    }
+    if (action === "open-document") {
+      S.activeDocument = target.dataset.id;
+      S.screen = "documents";
+      location.hash = "#/documents";
+      render();
+    }
+    if (action === "close-document") {
+      S.activeDocument = null;
+      render();
+    }
+    if (action === "open-offer") {
+      S.screen = "offers";
+      location.hash = "#/offers";
+      render();
+    }
+    if (action === "intake-type") {
+      const response = await fetch(`/api/intake/${target.dataset.id}/type`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ doc_type: target.dataset.type }),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) S.error = result.detail || "הסוג לא עודכן.";
+      else S.toast = "הסוג עודכן.";
+      await loadIntake();
+    }
+    if (action === "intake-link" || action === "intake-unlink") {
+      const response = await fetch(`/api/intake/${target.dataset.id}/links`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: action === "intake-link" ? "add" : "remove", row_ids: [target.dataset.row] }),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) S.error = result.detail || "השיוך לא עודכן.";
+      else S.toast = "השיוך עודכן. שורת המלאי נשארה.";
+      await loadIntake();
+    }
     if (action === "machine-act") {
       const id = target.dataset.id;
       const act = target.dataset.machineAct;
@@ -1784,6 +1987,10 @@
     }
     if (target.dataset.action === "tour-files") {
       await uploadTourFiles(target.files);
+      target.value = "";
+    }
+    if (target.dataset.action === "intake-files") {
+      await uploadIntake(target.files);
       target.value = "";
     }
     if (target.dataset.action === "role") {
@@ -2035,11 +2242,14 @@
     else if (hash.startsWith("#/comparables")) S.screen = "comparables";
     else if (hash.startsWith("#/visit-prep")) S.screen = "visit-prep";
     else if (hash.startsWith("#/machines")) S.screen = "machines";
+    else if (hash.startsWith("#/offers")) S.screen = "offers";
+    else if (hash.startsWith("#/documents")) S.screen = "documents";
     else S.screen = "capture";
     if (S.screen === "value") loadValue();
     if (S.screen === "value-detail") loadValueDetail(hash.split("/")[3]);
     if (S.screen === "comparables") loadComparables();
     if (S.screen === "visit-prep") loadVisitPrep();
+    if (S.screen === "documents" || S.screen === "offers") loadIntake();
     render();
   });
   let dragDepth = 0;
@@ -2070,7 +2280,8 @@
     event.preventDefault();
     const files = await filesFromDrop(event.dataTransfer);
     if (!files.length) return;
-    await uploadTourFiles(files);
+    if (S.screen === "documents") await uploadIntake(files);
+    else await uploadTourFiles(files);
   });
 
   window.addEventListener("online", () => { S.online = true; syncAll(); });
