@@ -264,6 +264,7 @@ function renderUpload() {
     <article class="card" style="margin-bottom:8px" data-file="${esc(file.id)}">
       <b>${tag(file.name || "טקסט")}</b>
       <p>${esc(file.confidence_label)} · ${esc(file.doc_type || "")}</p>
+      ${file.text ? `<p>${tag(String(file.text).slice(0, 180))}</p>` : ""}
       <p>${esc(file.summary || "")}</p>
       ${(file.links || []).map((link) => `<p class="muted">הצעה: ${tag(link.tag_norm || link.asset_id)} · ${esc(link.reason || "")}</p>`).join("")}
       ${file.user_locked ? `<p class="muted">השיוך אושר ולא יוחלף אוטומטית.</p>` : `
@@ -333,7 +334,8 @@ async function go(screen) {
   S.screen = screen;
   S.error = "";
   S.notice = "";
-  if (screen !== "asset") location.hash = "#/" + screen;
+  const next = "#/" + screen;
+  if (screen !== "asset" && location.hash !== next) location.hash = next;
   if (screen === "dashboard") return loadDashboard();
   if (screen === "inventory") return loadInventory();
   if (screen === "tasks") return loadTasks();
@@ -573,11 +575,16 @@ document.getElementById("app").addEventListener("submit", async (event) => {
 window.addEventListener("hashchange", () => {
   const hash = location.hash;
   if (!S.authed) return;
-  if (hash.startsWith("#/asset/")) loadAsset(decodeURIComponent(hash.split("/").slice(2).join("/")));
-  else if (hash.startsWith("#/inventory")) go("inventory");
-  else if (hash.startsWith("#/tasks")) go("tasks");
-  else if (hash.startsWith("#/upload")) go("upload");
-  else go("dashboard");
+  if (hash.startsWith("#/asset/")) {
+    const id = decodeURIComponent(hash.split("/").slice(2).join("/"));
+    if (S.screen === "asset" && S.assetId === id && S.asset) return;
+    loadAsset(id);
+    return;
+  }
+  if (hash.startsWith("#/inventory")) return S.screen === "inventory" ? null : go("inventory");
+  if (hash.startsWith("#/tasks")) return S.screen === "tasks" ? null : go("tasks");
+  if (hash.startsWith("#/upload")) return S.screen === "upload" ? null : go("upload");
+  if (S.screen !== "dashboard") go("dashboard");
 });
 
 async function boot() {
