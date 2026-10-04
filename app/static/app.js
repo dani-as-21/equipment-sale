@@ -1610,10 +1610,15 @@
           <p class="hint">תאריך ${ltr(offer.offer_date || "לא צוין")} · תוקף ${ltr(offer.expiry || "לא צוין")}</p>
           <p>פריטים: ${(offer.assets || []).map((asset) => `${ltr(asset.tag_original)} (${esc(asset.role)})`).join(", ") || "לא זוהו"}</p>
           ${offer.exclusions ? `<p>החרגות: ${esc(offer.exclusions)}</p>` : ""}
+          <p>תשלום: ${esc(offer.payment_terms || "לא צוין")}. בדיקה: ${esc(offer.inspection || "לא צוינה")}. תנאים: ${esc(offer.contingencies || "לא צוינו")}.</p>
+          <p class="hint">פירוק: ${esc(offer.dismantling || "לא צוין")} · העמסה: ${esc(offer.loading || "לא צוין")} · הובלה: ${esc(offer.transport || "לא צוין")} · פינוי: ${ltr(offer.removal_date || "לא צוין")}</p>
+          ${(offer.missing || []).length ? `<p class="hint">חסר: ${esc(offer.missing.join(", "))}</p>` : ""}
           <p>${esc(assessment.conclusion || "")}</p>
           ${range.range_label ? `<p class="hint">טווח: ${ltr(range.range_label)} · ${ltr((range.created_at || "").slice(0, 10))} · ביטחון: ${esc(range.confidence || "")}</p>` : ""}
           <p class="hint">${esc(assessment.confidence_why || "")}</p>
           ${(assessment.differences || []).map((item) => `<p class="hint">${esc(item)}</p>`).join("")}
+          ${(assessment.market_evidence || []).map((item) => `<p class="hint">ראיית שוק: ${esc(item.title)} · ${ltr((item.amount != null ? item.amount : "") + " " + (item.currency || ""))} · ${ltr(item.date || "")}</p>`).join("")}
+          ${assessment.net_proceeds != null ? `<p><b>תמורה נטו משוערת:</b> ${ltr(assessment.net_proceeds + " " + (offer.currency || ""))}</p>` : ""}
           <p>${esc(assessment.net_note || "")}</p>
           <p><b>הצעד המומלץ:</b> ${esc(recommendation.label || "")}</p>
           <p class="hint">${esc(recommendation.separated || "")}</p>
@@ -1643,13 +1648,18 @@
     await loadIntake();
   }
 
+  let intakeLoadSeq = 0;
   async function loadIntake() {
+    const seq = ++intakeLoadSeq;
     const [docs, offers] = await Promise.all([
       fetch("/api/intake", { credentials: "include" }),
       fetch("/api/offers", { credentials: "include" }),
     ]);
+    if (seq !== intakeLoadSeq) return;
     if (docs.ok) S.documents = (await docs.json()).documents || [];
+    if (seq !== intakeLoadSeq) return;
     if (offers.ok) S.offers = (await offers.json()).offers || [];
+    if (seq !== intakeLoadSeq) return;
     render();
   }
 

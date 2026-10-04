@@ -1,4 +1,4 @@
-const CACHE = "capture-shell-v5";
+const CACHE = "capture-shell-v6";
 const SHELL = ["/", "/static/app.js", "/static/match.js", "/static/store.js", "/static/style.css", "/static/manifest.webmanifest"];
 
 self.addEventListener("install", (event) => {

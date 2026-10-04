@@ -217,3 +217,65 @@ def test_spreadsheet_word_and_image_keep_source_refs(client):
         assert any(link["tag_norm"] == "A-707" and link["link_status"] == "confirmed" for link in image_result["document"]["links"])
     else:
         assert image_result["document"]["extraction_note"] or image_result["document"]["summary"]["unprocessed"]
+
+
+def test_net_proceeds_and_stated_conversion(client):
+    generator = _row(client, "X-9113")
+    _range(client, generator["id"])
+    quote = _post(
+        client,
+        "x9113-crane.txt",
+        "Quotation for dismantling\nSupplier: Crane Co\nAmount: 800 USD\nScope: dismantling of X-9113\n".encode(),
+    ).json()["results"][0]
+    assert quote["document"]["doc_type"] == "service_quote"
+
+    priced = (
+        "Purchase offer\nBuyer: Net Buyer\nContact: net@example.test\n"
+        "Offer date: 2026-06-01\nExpiry: 2026-07-01\nAsset: X-9113\n"
+        "Offer price: 9000 USD\nVAT excluded\nPayment: 30 days\n"
+        "Dismantling: seller\nLoading: buyer\nTransport: buyer\n"
+    )
+    offer = _post(client, "net-offer.txt", priced.encode()).json()["results"][0]["offer"]
+    assert offer["assessment"]["net_proceeds"] == 8200
+    assert "Crane Co" in offer["assessment"]["net_note"]
+    assert "אפס" not in offer["assessment"]["net_note"]
+    assert offer["assessment"]["position"] == "below"
+    assert offer["assessment"]["market_evidence"]
+    valuation = client.get(f"/api/valuation/subjects/{_id('VAL-', generator['id'])}").json()
+    assert "Net Buyer" not in json.dumps(valuation)
+    assert "8200" not in json.dumps(valuation)
+
+    euro = (
+        "Purchase offer\nBuyer: Euro Buyer\nOffer date: 2026-06-02\nExpiry: 2026-08-01\n"
+        "Asset: X-9113\nOffer price: 10000 EUR\nVAT excluded\nPayment: on removal\n"
+        "Dismantling: buyer\nLoading: buyer\nTransport: seller, 500 EUR\n"
+        "1 EUR = 1.10 USD as of 2026-06-02\n"
+    )
+    compared = _post(client, "euro-offer.txt", euro.encode()).json()["results"][0]["offer"]
+    assert compared["amount"] == 10000
+    assert compared["currency"] == "EUR"
+    assert compared["assessment"]["net_proceeds"] == 9500
+    assert compared["assessment"]["position"] == "within"
+    assert "2026-06-02" in " ".join(compared["assessment"]["differences"])
+    assert "אינו המלצה" in compared["assessment"]["confidence_why"]
+    assert "לא מתחייבת" in compared["assessment"]["recommendation"]["separated"]
+    assert compared["assessment"]["recommendation"]["action"] in {"consider_acceptance", "clarify_terms"}
+
+    undated = euro.replace(" as of 2026-06-02", "").replace("Euro Buyer", "Plain Euro").replace("10000 EUR", "8000 EUR").replace("seller, 500 EUR", "buyer")
+    plain = _post(client, "plain-euro.txt", undated.encode()).json()["results"][0]["offer"]
+    assert plain["assessment"]["conclusion"] == "אין די מידע להערכה"
+    assert plain["assessment"]["position"] == ""
+    assert plain["assessment"]["net_proceeds"] == 8000
+    assert "שער" in plain["assessment"]["confidence_why"]
+
+    gross = (
+        "Purchase offer\nBuyer: Gross Buyer\nOffer date: 2026-06-03\nExpiry: 2026-08-03\n"
+        "Asset: X-9113\nOffer price: 11700 USD\nVAT included\nVAT 17%\nPayment: 30 days\n"
+        "Dismantling: buyer\nLoading: buyer\nTransport: buyer\n"
+    )
+    gross_offer = _post(client, "gross-offer.txt", gross.encode()).json()["results"][0]["offer"]
+    assert gross_offer["amount"] == 11700
+    assert gross_offer["vat"] == "included"
+    assert gross_offer["assessment"]["position"] == "within"
+    assert "17%" in " ".join(gross_offer["assessment"]["differences"])
+    assert "11700" not in json.dumps(client.get(f"/api/valuation/subjects/{_id('VAL-', generator['id'])}").json())

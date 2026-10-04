@@ -443,7 +443,231 @@ def _offer_fields(text: str, matches: dict) -> dict:
         "excluded_tags": excluded_tags,
         "candidate_tags": [item.get("tag_norm") or item.get("tag") for item in matches["candidates"]],
         "amounts_seen": amounts,
+        "fx": _stated_fx(text),
+        "vat_rate": _stated_vat_rate(text),
     }
+
+
+def _stated_fx(text: str) -> dict | None:
+    match = re.search(
+        r"1\s*(USD|EUR|ILS|GBP|NIS|₪|\$|€)\s*=\s*([0-9]+(?:\.[0-9]+)?)\s*(USD|EUR|ILS|GBP|NIS|₪|\$|€)",
+        text or "",
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+    source, rate, target = _currency(match.group(1)), float(match.group(2)), _currency(match.group(3))
+    if not source or not target or source == target or rate <= 0:
+        return None
+    window = (text or "")[max(0, match.start() - 40) : match.end() + 50]
+    dated = re.search(
+        r"(?:as of|on|dated|מתאריך|בתאריך)\s*[:\-]?\s*(\d{4}-\d{2}-\d{2}|\d{1,2}[./]\d{1,2}[./]\d{2,4})",
+        window,
+        re.IGNORECASE,
+    )
+    if not dated:
+        return None
+    return {
+        "from": source,
+        "to": target,
+        "rate": rate,
+        "date": dated.group(1),
+        "assumption": f"1 {source} = {rate:g} {target} לפי המסמך, תאריך ההמרה {dated.group(1)}.",
+    }
+
+
+def _stated_vat_rate(text: str) -> float | None:
+    match = re.search(r"(?:vat|מע״מ|מע\"מ|מעמ)\s*(?:rate|שיעור)?\s*[:\-]?\s*(\d{1,2}(?:\.\d+)?)\s*%", text or "", re.IGNORECASE)
+    if not match:
+        return None
+    rate = float(match.group(1))
+    if rate <= 0 or rate >= 100:
+        return None
+    return rate
+
+
+def _convert(amount: float | None, source: str, target: str, fx: dict | None) -> float | None:
+    if amount is None or not source or not target:
+        return None
+    if source == target:
+        return round(float(amount), 2)
+    if not fx or not fx.get("rate"):
+        return None
+    if fx.get("from") == source and fx.get("to") == target:
+        return round(float(amount) * float(fx["rate"]), 2)
+    if fx.get("from") == target and fx.get("to") == source:
+        return round(float(amount) / float(fx["rate"]), 2)
+    return None
+
+
+def _counted_evidence(conn, subject_id: str) -> tuple[list[dict], str]:
+    if not subject_id:
+        return [], ""
+    groups: dict[tuple, list] = {}
+    for row in conn.execute(
+        """
+        SELECT title, price_amount, currency, tax_treatment, price_type, source_url, research_date,
+               included_services, role, duplicate_of
+        FROM market_evidence WHERE subject_id = ?
+        """,
+        (subject_id,),
+    ):
+        if row["duplicate_of"] or row["role"] != "direct":
+            continue
+        if row["price_type"] not in {"asking", "transaction", "hammer", "buyer_total"}:
+            continue
+        if row["included_services"] != "asset_only" or row["price_amount"] is None or not row["currency"]:
+            continue
+        key = (row["price_type"], row["currency"], row["tax_treatment"] or "unknown")
+        groups.setdefault(key, []).append(dict(row))
+    chosen = None
+    for key, group in groups.items():
+        if len(group) >= 2 and (chosen is None or len(group) > len(chosen[1])):
+            chosen = (key, group)
+    if not chosen:
+        return [], ""
+    evidence = [
+        {
+            "title": item["title"],
+            "amount": item["price_amount"],
+            "currency": item["currency"],
+            "tax_treatment": item["tax_treatment"] or "unknown",
+            "price_type": item["price_type"],
+            "source_url": item["source_url"] or "",
+            "date": str(item["research_date"] or "")[:10],
+        }
+        for item in chosen[1]
+    ]
+    return evidence, chosen[0][2]
+
+
+def _comparison_amount(fields: dict, range_info: dict | None, evidence_tax: str) -> tuple[dict | None, str]:
+    notes = []
+    amount = fields["amount"]
+    currency = fields["currency"]
+    if amount is None or not currency or not range_info or range_info.get("range_low") is None or not range_info.get("currency"):
+        if fields["vat"] == "unknown":
+            notes.append("טיפול המע״מ לא צוין, ולא נורמל.")
+        return {"amount": amount, "currency": currency, "notes": notes}, ""
+    target = range_info["currency"]
+    if currency != target:
+        converted = _convert(amount, currency, target, fields.get("fx"))
+        if converted is None:
+            return None, "אי אפשר למקם את ההצעה מול הטווח בלי שער המרה ותאריך שכתובים במסמך."
+        notes.append(
+            "הסכום הומר להשוואה בלבד, והסכום המקורי נשמר: "
+            + fields["fx"]["assumption"]
+            + f" {amount:g} {currency} = {converted:g} {target}."
+        )
+        amount, currency = converted, target
+    offer_tax = {"excluded": "excluded_vat", "included": "included_vat"}.get(fields["vat"], "unknown")
+    if offer_tax == "unknown" or evidence_tax in {"", "unknown", "mixed"}:
+        notes.append("טיפול המע״מ לא צוין בשני הצדדים באותו אופן, ולא נורמל.")
+    elif offer_tax == evidence_tax:
+        notes.append("ההצעה והראיות באותו בסיס מע״מ, ולכן הסכום לא שונה.")
+    else:
+        rate = fields.get("vat_rate")
+        if not rate:
+            return None, "טיפול המע״מ שונה בין ההצעה לראיות, ואין במסמך שיעור מע״מ, ולכן הסכום לא נורמל."
+        if offer_tax == "included_vat" and evidence_tax == "excluded_vat":
+            amount = round(amount / (1 + rate / 100), 2)
+            direction = "מכולל מע״מ לבסיס ללא מע״מ"
+        else:
+            amount = round(amount * (1 + rate / 100), 2)
+            direction = "מללא מע״מ לבסיס שכולל מע״מ"
+        notes.append(f"הסכום הומר להשוואה {direction} לפי שיעור {rate:g}% שכתוב במסמך. השיעור לא הומצא.")
+    return {"amount": amount, "currency": currency, "notes": notes}, ""
+
+
+def _judge(conn, fields: dict, range_info: dict | None, subject_id: str):
+    evidence, evidence_tax = _counted_evidence(conn, subject_id)
+    compare, blocked = _comparison_amount(fields, range_info, evidence_tax)
+    if blocked:
+        return "אין די מידע להערכה", blocked, "clarify_terms", "low", "", [blocked], evidence
+    placed = {"amount": compare["amount"], "currency": compare["currency"], "missing": fields["missing"]}
+    conclusion, why, action, confidence, position = _place_amount(placed, range_info)
+    return conclusion, why, action, confidence, position, compare["notes"], evidence
+
+
+_COST_LINES = (
+    ("פירוק", "dismantling", ("dismantling", "פירוק")),
+    ("העמסה", "loading", ("loading",)),
+    ("הובלה", "transport", ("transport", "הובלה")),
+)
+
+
+def _one_service_quote(conn, kinds: tuple[str, ...], tags: list[str], currency: str, fx: dict | None):
+    hits = []
+    for row in conn.execute("SELECT supplier, service_kind, amount, currency, scope_text FROM service_quotes"):
+        if (row["service_kind"] or "") not in kinds:
+            continue
+        if row["amount"] is None:
+            continue
+        scope = (row["scope_text"] or "").upper()
+        if tags and not all(tag in scope for tag in tags):
+            continue
+        converted = _convert(row["amount"], row["currency"] or "", currency, fx)
+        if converted is None:
+            continue
+        hits.append((converted, row["supplier"] or ""))
+    if len(hits) != 1:
+        return None, ""
+    return hits[0]
+
+
+def _seller_cost(value: str, currency: str, fx: dict | None) -> tuple[str, float | None]:
+    text = value or ""
+    if not text.strip():
+        return "missing", None
+    buyer = bool(re.search(r"\bbuyer\b|הקונה|purchaser|כלול במחיר|included in the price|included in price", text, re.IGNORECASE))
+    seller = bool(re.search(r"\bseller\b|המוכר|on the seller|on seller|we will|אנחנו", text, re.IGNORECASE))
+    if buyer and not seller:
+        return "buyer", 0.0
+    if not seller:
+        return "unknown_party", None
+    amounts = _find_money(text)
+    if len(amounts) != 1:
+        return "seller_unpriced", None
+    converted = _convert(amounts[0]["amount"], amounts[0]["currency"], currency, fx)
+    if converted is None:
+        return "seller_unpriced", None
+    return "seller", converted
+
+
+def _net_proceeds(conn, fields: dict) -> tuple[float | None, str]:
+    amount, currency = fields["amount"], fields["currency"]
+    if amount is None or not currency:
+        return None, "בלי סכום ומטבע אי אפשר לחשב תמורה נטו. עלות לא ידועה לא נרשמה כאפס."
+    tags = [item["tag_norm"] for item in fields["assets"] if item.get("tag_norm")]
+    unknown = []
+    parts = []
+    total = 0.0
+    for label, key, kinds in _COST_LINES:
+        state, cost = _seller_cost(fields[key], currency, fields.get("fx"))
+        if state == "buyer":
+            parts.append(f"{label} על הקונה ולכן לא נוכתה")
+            continue
+        if state == "seller" and cost is not None:
+            total += cost
+            parts.append(f"{label} {cost:g} {currency} על המוכר")
+            continue
+        if state == "seller_unpriced":
+            quote_amount, supplier = _one_service_quote(conn, kinds, tags, currency, fields.get("fx"))
+            if quote_amount is None:
+                unknown.append(label)
+                continue
+            total += quote_amount
+            who = f" ({supplier})" if supplier else ""
+            parts.append(f"{label} {quote_amount:g} {currency} לפי הצעת ספק{who}")
+            continue
+        unknown.append(label)
+    if unknown:
+        return None, "חסר מידע על " + ", ".join(unknown) + ". עלות לא ידועה לא נחשבה כאפס."
+    net = amount - total
+    detail = " ".join(parts)
+    if total == 0:
+        return net, f"התמורה נטו המשוערת {net:g} {currency}. {detail}. האפס הוא כי צוין שהקונה נושא בעלות, לא כי עלות חסרה נרשמה כאפס."
+    return net, f"התמורה נטו המשוערת {net:g} {currency} אחרי עלויות מוכר שצוינו. {detail}. זו אינה המלצה."
 
 
 def _latest_range(conn, subject_id: str) -> dict | None:
@@ -511,7 +735,8 @@ def _assess_offer(conn, fields: dict, created_at: str) -> dict:
             differences.append("השווי הקיים, אם יש, הוא לרכיב ולא לחבילה שבהצעה.")
         else:
             range_info = _latest_range(conn, subject_id)
-            conclusion, why, action, confidence, position = _place_amount(fields, range_info)
+            conclusion, why, action, confidence, position, notes, evidence = _judge(conn, fields, range_info, subject_id)
+            differences.extend(notes)
     else:
         if len(row_ids) > 1:
             conclusion = not_enough
@@ -521,29 +746,11 @@ def _assess_offer(conn, fields: dict, created_at: str) -> dict:
         else:
             subject_id = ensure_row_subject(conn, row_ids[0], created_at)["id"]
             range_info = _latest_range(conn, subject_id)
-            conclusion, why, action, confidence, position = _place_amount(fields, range_info)
-    if fields["vat"] == "unknown":
+            conclusion, why, action, confidence, position, notes, evidence = _judge(conn, fields, range_info, subject_id)
+            differences.extend(notes)
+    if fields["vat"] == "unknown" and not any("מע״מ" in item for item in differences):
         differences.append("טיפול המע״מ לא צוין, ולא נורמל.")
-    if fields["currency"] and range_info and range_info.get("currency") and fields["currency"] != range_info["currency"]:
-        differences.append("המטבעות שונים, ואין במסמך שער ותאריך המרה.")
-        position = ""
-        conclusion = not_enough
-        why = "אי אפשר למקם את ההצעה מול הטווח בלי שער המרה שכתוב במסמך."
-        action = "clarify_terms"
-        confidence = "low"
-    seller_costs = []
-    unknown_costs = []
-    for label, value in (("פירוק", fields["dismantling"]), ("העמסה", fields["loading"]), ("הובלה", fields["transport"])):
-        if not value:
-            unknown_costs.append(label)
-        elif re.search(r"seller|המוכר|אנחנו|we will|on seller", value, re.IGNORECASE):
-            seller_costs.append(label)
-    net = None
-    net_note = "עלויות המוכר לא ידועות, ולכן התמורה נטו לא חושבה ולא נרשמה כאפס."
-    if unknown_costs:
-        net_note = "חסר מי מטפל ב" + ", ".join(unknown_costs) + ". עלות לא ידועה לא נחשבה כאפס."
-    elif seller_costs:
-        net_note = "צוין שהמוכר נושא ב" + ", ".join(seller_costs) + ", ואין סכום לעלות הזו. התמורה נטו לא חושבה."
+    net, net_note = _net_proceeds(conn, fields)
     if fields["exclusions"]:
         differences.append("ההצעה מציינת החרגות: " + fields["exclusions"][:240])
     if fields["excluded_tags"]:
