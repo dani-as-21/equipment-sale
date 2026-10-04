@@ -53,6 +53,9 @@ async def lifespan(app: FastAPI):
         from app import machines
 
         machines.ensure_machines(conn, logic.now_iso())
+        from app import product
+
+        product.ensure_questions(conn, logic.now_iso())
         conn.commit()
     finally:
         conn.close()
@@ -859,6 +862,125 @@ def create_app() -> FastAPI:
             return valuation.save_commercial(conn, row_id, body, logic.now_iso())
         except LookupError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/api/dashboard")
+    def product_dashboard(request: Request, conn=Depends(get_conn)):
+        require_user(request)
+        from app import product
+
+        return product.dashboard(conn)
+
+    @app.get("/api/assets")
+    def product_assets(request: Request, conn=Depends(get_conn), q: str = "", category: str = "", label: str = "", attention: str = "", offset: int = 0):
+        require_user(request)
+        from app import product
+
+        return product.list_assets(conn, q=q, category=category, label=label, attention=attention, offset=max(offset, 0))
+
+    @app.get("/api/assets/{asset_id}")
+    def product_asset(asset_id: str, request: Request, conn=Depends(get_conn)):
+        require_user(request)
+        from app import product
+
+        try:
+            return product.asset_detail(conn, asset_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/api/assets/{asset_id}/relationship")
+    def product_relationship(asset_id: str, request: Request, body: dict, conn=Depends(get_conn)):
+        require_user(request)
+        from app import product
+
+        try:
+            result = product.set_relationship(conn, asset_id, body, logic.now_iso())
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        conn.commit()
+        return result
+
+    @app.post("/api/assets/{asset_id}/evidence")
+    def product_evidence(asset_id: str, request: Request, body: dict, conn=Depends(get_conn)):
+        require_user(request)
+        from app import product
+
+        try:
+            result = product.add_evidence(conn, asset_id, body, logic.now_iso())
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        conn.commit()
+        return result
+
+    @app.get("/api/tasks")
+    def product_tasks(request: Request, conn=Depends(get_conn)):
+        require_user(request)
+        from app import product
+
+        return product.list_tasks(conn)
+
+    @app.post("/api/tasks/{task_id}")
+    def product_task_update(task_id: str, request: Request, body: dict, conn=Depends(get_conn)):
+        require_user(request)
+        from app import product
+
+        try:
+            result = product.update_task(conn, task_id, body, logic.now_iso())
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        conn.commit()
+        return result
+
+    @app.get("/api/uploads")
+    def product_uploads(request: Request, conn=Depends(get_conn)):
+        require_user(request)
+        from app import product
+
+        return product.list_uploads(conn)
+
+    @app.post("/api/uploads")
+    async def product_upload(request: Request, conn=Depends(get_conn)):
+        require_user(request)
+        from app import product
+
+        form = await request.form()
+        note = str(form.get("note") or "")
+        uploads = [item for item in form.getlist("files") if hasattr(item, "read")]
+        if not uploads and not note.strip():
+            raise HTTPException(status_code=400, detail="צריך קובץ או טקסט.")
+        settings = get_settings()
+        created = logic.now_iso()
+        results = []
+        if not uploads:
+            results.append(product.receive_upload(conn, name="note.txt", data=b"", note=note, photo_dir=settings.photo_dir, created_at=created))
+        for upload in uploads:
+            data = await upload.read()
+            name = getattr(upload, "filename", None) or "document"
+            if len(data) > 25 * 1024 * 1024:
+                results.append({"id": "", "summary": "הקובץ גדול מדי ולא נשמר.", "status": "failed"})
+                continue
+            results.append(product.receive_upload(conn, name=name, data=data, note=note, photo_dir=settings.photo_dir, created_at=created))
+        conn.commit()
+        return {"results": results}
+
+    @app.post("/api/uploads/{file_id}")
+    def product_upload_confirm(file_id: str, request: Request, body: dict, conn=Depends(get_conn)):
+        require_user(request)
+        from app import product
+
+        try:
+            result = product.confirm_upload(conn, file_id, body, logic.now_iso())
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        conn.commit()
+        return result
 
     return app
 

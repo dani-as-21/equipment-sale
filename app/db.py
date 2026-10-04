@@ -414,6 +414,65 @@ CREATE INDEX IF NOT EXISTS idx_links_capture ON evidence_links(capture_id);
 CREATE INDEX IF NOT EXISTS idx_review_status ON review_items(status);
 CREATE INDEX IF NOT EXISTS idx_val_req_subject ON valuation_requirements(subject_id);
 CREATE INDEX IF NOT EXISTS idx_val_evidence_subject ON market_evidence(subject_id);
+
+CREATE TABLE IF NOT EXISTS project_files (
+  id TEXT PRIMARY KEY,
+  sha256 TEXT NOT NULL UNIQUE,
+  original_name TEXT,
+  stored_path TEXT,
+  media_kind TEXT,
+  extracted_text TEXT,
+  note_text TEXT,
+  doc_type TEXT,
+  confidence TEXT,
+  summary TEXT,
+  status TEXT NOT NULL,
+  user_locked INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS project_file_links (
+  id TEXT PRIMARY KEY,
+  file_id TEXT NOT NULL,
+  asset_id TEXT NOT NULL,
+  tag_norm TEXT,
+  confidence TEXT,
+  reason TEXT,
+  user_locked INTEGER NOT NULL DEFAULT 0,
+  UNIQUE(file_id, asset_id)
+);
+
+CREATE TABLE IF NOT EXISTS manual_assets (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  category TEXT NOT NULL,
+  tag TEXT,
+  note TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS valuation_notes (
+  id TEXT PRIMARY KEY,
+  asset_id TEXT NOT NULL,
+  source TEXT,
+  evidence_date TEXT,
+  currency TEXT,
+  price_text TEXT,
+  description TEXT,
+  manufacturer TEXT,
+  model TEXT,
+  year TEXT,
+  condition_text TEXT,
+  location TEXT,
+  value_kind TEXT,
+  body TEXT,
+  file_id TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_project_links_asset ON project_file_links(asset_id);
+CREATE INDEX IF NOT EXISTS idx_valuation_notes_asset ON valuation_notes(asset_id);
 """
 
 
