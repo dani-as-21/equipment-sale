@@ -774,6 +774,7 @@ def create_app() -> FastAPI:
                 results.append(intake.ingest_file(conn, original_name=name, data=data, photo_dir=settings.photo_dir, created_at=created))
             except Exception:
                 results.append({"saved": False, "duplicate": False, "status": "failed", "message": "הקובץ לא נשמר.", "document": None, "original_name": name})
+        conn.commit()
         return {"results": results}
 
     @app.get("/api/intake")
@@ -807,7 +808,9 @@ def create_app() -> FastAPI:
         from app import intake
 
         try:
-            return intake.set_type(conn, document_id, body.get("doc_type") or "", logic.now_iso())
+            document = intake.set_type(conn, document_id, body.get("doc_type") or "", logic.now_iso())
+            conn.commit()
+            return document
         except LookupError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ValueError as exc:
@@ -819,7 +822,9 @@ def create_app() -> FastAPI:
         from app import intake
 
         try:
-            return intake.set_links(conn, document_id, body, logic.now_iso())
+            document = intake.set_links(conn, document_id, body, logic.now_iso())
+            conn.commit()
+            return document
         except LookupError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ValueError as exc:

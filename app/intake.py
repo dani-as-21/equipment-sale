@@ -383,6 +383,8 @@ def _offer_fields(text: str, matches: dict) -> dict:
         vat = "included"
     exclusions = []
     for line in text.splitlines():
+        if re.search(r"\bvat\b|מע״מ|מע\"מ|מעמ", line, re.IGNORECASE):
+            continue
         if re.search(r"exclud|לא כולל|אינו כולל", line, re.IGNORECASE):
             exclusions.append(line.strip()[:240])
     included = matches["confirmed"]
