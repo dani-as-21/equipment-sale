@@ -90,6 +90,12 @@ def _load(conn: sqlite3.Connection) -> dict:
         members[item["machine_id"]].append(item)
         if item["inventory_row_id"]:
             covered.add(item["inventory_row_id"])
+    component_rows = [dict(row) for row in conn.execute("SELECT * FROM asset_components")]
+    components: dict[str, list[dict]] = defaultdict(list)
+    for item in component_rows:
+        components[item["asset_id"]].append(item)
+        if item["link_status"] == "active" and item.get("inventory_row_id"):
+            covered.add(item["inventory_row_id"])
     rows = [dict(row) for row in conn.execute("SELECT * FROM inventory_rows WHERE kind = 'equipment'")]
     by_id = {row["id"]: row for row in rows}
     manuals = [dict(row) for row in conn.execute("SELECT * FROM manual_assets ORDER BY created_at")]
@@ -97,6 +103,7 @@ def _load(conn: sqlite3.Connection) -> dict:
     return {
         "machines": machines,
         "members": members,
+        "components": components,
         "covered": covered,
         "rows": rows,
         "by_id": by_id,
@@ -187,11 +194,77 @@ def _brief_manual(row: dict) -> dict:
     }
 
 
+def _component_sort_key(tag: str, role: str) -> tuple:
+    primary = 0 if role == "רכיב ראשי" else 1
+    text = tag or ""
+    if "/" in text:
+        head, tail = text.split("/", 1)
+        if tail.isdigit():
+            return (primary, head, 0, int(tail), "")
+        return (primary, head, 1, 0, tail)
+    return (primary, text, 0, 0, "")
+
+
+def _merged_components(data: dict, asset_id: str, machine: dict | None) -> list[dict]:
+    items: list[dict] = []
+    seen_rows: set[str] = set()
+    seen_tags: set[str] = set()
+    if machine:
+        for member in data["members"].get(asset_id, []):
+            public = _component_public(member, machine, data["by_id"], data["sources"])
+            public["id"] = member["id"]
+            public["name"] = ""
+            public["notes"] = ""
+            public["origin"] = "machine"
+            public["removable"] = member.get("member_role") != "parent"
+            items.append(public)
+            if member.get("inventory_row_id"):
+                seen_rows.add(member["inventory_row_id"])
+            if member.get("tag_norm"):
+                seen_tags.add(member["tag_norm"])
+    for comp in data["components"].get(asset_id, []):
+        if comp.get("link_status") != "active":
+            continue
+        row_id = comp.get("inventory_row_id") or ""
+        tag_norm = comp.get("tag_norm") or ""
+        if row_id and row_id in seen_rows:
+            continue
+        if tag_norm and tag_norm in seen_tags and row_id:
+            continue
+        items.append(_component_from_link(comp, data["by_id"], data["sources"]))
+    items.sort(key=lambda item: _component_sort_key(item.get("tag") or item.get("name") or "", item.get("role") or ""))
+    return items
+
+
 def catalog(conn: sqlite3.Connection) -> list[dict]:
     data = _load(conn)
-    assets = [_brief_machine(machine, data["members"].get(machine["id"], []), data["by_id"]) for machine in data["machines"]]
-    assets.extend(_brief_row(row) for row in data["rows"] if row["id"] not in data["covered"])
-    assets.extend(_brief_manual(row) for row in data["manuals"])
+    assets = []
+    for machine in data["machines"]:
+        brief = _brief_machine(machine, data["members"].get(machine["id"], []), data["by_id"])
+        merged = _merged_components(data, machine["id"], machine)
+        brief["component_count"] = len(merged)
+        for item in merged:
+            if item.get("tag") and item["tag"] not in brief["tags"]:
+                brief["tags"].append(item["tag"])
+        assets.append(brief)
+    for row in data["rows"]:
+        if row["id"] in data["covered"]:
+            continue
+        brief = _brief_row(row)
+        merged = _merged_components(data, row["id"], None)
+        brief["component_count"] = len(merged)
+        for item in merged:
+            if item.get("tag") and item["tag"] not in brief["tags"]:
+                brief["tags"].append(item["tag"])
+        assets.append(brief)
+    for row in data["manuals"]:
+        brief = _brief_manual(row)
+        merged = _merged_components(data, row["id"], None)
+        brief["component_count"] = len(merged)
+        for item in merged:
+            if item.get("tag") and item["tag"] not in brief["tags"]:
+                brief["tags"].append(item["tag"])
+        assets.append(brief)
     for asset in assets:
         asset["category_label"] = CATEGORIES.get(asset["category"], asset["category"])
     return assets
@@ -286,6 +359,31 @@ def _component_public(member: dict, machine: dict, by_id: dict, sources: dict) -
     }
 
 
+def _component_from_link(comp: dict, by_id: dict, sources: dict) -> dict:
+    row = by_id.get(comp.get("inventory_row_id") or "")
+    tag = comp.get("tag_original") or (row or {}).get("tag_original") or comp.get("tag_norm") or ""
+    description = (comp.get("description") or "").strip() or ((row or {}).get("description") or "")
+    confidence = "confirmed"
+    return {
+        "id": comp["id"],
+        "tag": tag,
+        "tag_norm": comp.get("tag_norm") or "",
+        "name": comp.get("name") or "",
+        "type_label": prefix_label(comp.get("tag_norm") or tag),
+        "description": description,
+        "notes": comp.get("notes") or "",
+        "role": "רכיב",
+        "confidence": confidence,
+        "confidence_label": CONFIDENCE[confidence],
+        "explanation": comp.get("explanation") or "",
+        "source": _source_label(row, sources) if row else "אין שורת מקור. הרכיב נוצר מהטופס.",
+        "row_id": comp.get("inventory_row_id") or "",
+        "in_source": bool(row),
+        "removable": True,
+        "origin": comp.get("origin") or "user",
+    }
+
+
 def _files_for(conn: sqlite3.Connection, asset_id: str) -> list[dict]:
     found = []
     for row in conn.execute(
@@ -373,7 +471,7 @@ def asset_detail(conn: sqlite3.Connection, asset_id: str) -> dict:
     parent = next((item for item in members if item["member_role"] == "parent"), None)
     tech_row = data["by_id"].get(parent["inventory_row_id"]) if parent and parent.get("inventory_row_id") else row
     technical = _technical(tech_row, data["sources"])
-    components = [_component_public(item, machine, data["by_id"], data["sources"]) for item in members] if machine else []
+    components = _merged_components(data, asset_id, machine)
     return {
         **asset,
         "category_label": CATEGORIES.get(asset["category"], asset["category"]),
@@ -766,3 +864,414 @@ def add_evidence(conn: sqlite3.Connection, asset_id: str, body: dict, created_at
     )
     log_change(conn, actor=ACTOR_USER, action="evidence", entity_type="asset", entity_id=asset_id, prior=None, new={"id": evidence_id, "price_text": price, "value_kind": kind}, created_at=created_at)
     return {"id": evidence_id, "stored": True}
+
+
+def _host_for_parent(parent_row_id: str, data: dict) -> str:
+    as_parent = []
+    as_component = []
+    for machine in data["machines"]:
+        for member in data["members"].get(machine["id"], []):
+            if member.get("inventory_row_id") != parent_row_id:
+                continue
+            if member.get("member_role") == "parent":
+                as_parent.append(machine)
+            else:
+                as_component.append(machine)
+    if as_parent:
+        as_parent.sort(key=lambda machine: (0 if machine.get("basis") == "user" else 1, machine["id"]))
+        return as_parent[0]["id"]
+    if len(as_component) == 1:
+        return as_component[0]["id"]
+    return parent_row_id
+
+
+def ensure_slash_components(conn: sqlite3.Connection, created_at: str) -> None:
+    """A tag shaped like PARENT/SUFFIX belongs to the parent tag. Nothing else is grouped here."""
+    data = _load(conn)
+    by_tag: dict[str, list[dict]] = defaultdict(list)
+    for row in data["rows"]:
+        if row.get("tag_norm"):
+            by_tag[row["tag_norm"]].append(row)
+    known = {row["id"] for row in conn.execute("SELECT id FROM asset_components")}
+    linked_rows = {
+        row["inventory_row_id"]
+        for row in conn.execute("SELECT inventory_row_id FROM asset_components WHERE inventory_row_id IS NOT NULL AND inventory_row_id != ''")
+    }
+    for row in data["rows"]:
+        tag = row.get("tag_norm") or ""
+        if "/" not in tag:
+            continue
+        parent_tag, suffix = tag.split("/", 1)
+        if not parent_tag or not suffix.strip():
+            continue
+        parents = by_tag.get(parent_tag) or []
+        if len(parents) != 1:
+            continue
+        parent = parents[0]
+        if parent["id"] == row["id"] or row["id"] in linked_rows:
+            continue
+        component_id = "CMP-" + _digest(f"row|{row['id']}")
+        if component_id in known:
+            continue
+        host = _host_for_parent(parent["id"], data)
+        explanation = (
+            f"התג הוא {parent_tag} ואחריו לוכסן וסיומת {suffix}. "
+            "החיבור הוא לפי הצורה הזו. מספר משותף או קידומת לבדם לא מחברים."
+        )
+        conn.execute(
+            """
+            INSERT INTO asset_components (
+              id, asset_id, tag_norm, tag_original, name, description, notes, inventory_row_id,
+              origin, link_status, user_locked, explanation, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, '', '', '', ?, 'slash', 'active', 0, ?, ?, ?)
+            """,
+            (
+                component_id,
+                host,
+                tag,
+                row.get("tag_original") or tag,
+                row["id"],
+                explanation,
+                created_at,
+                created_at,
+            ),
+        )
+        known.add(component_id)
+        linked_rows.add(row["id"])
+
+
+def search_inventory(conn: sqlite3.Connection, query: str, limit: int = 30) -> dict:
+    needle = (query or "").strip().casefold()
+    if not needle:
+        return {"items": []}
+    data = _load(conn)
+    found = []
+    for row in data["rows"]:
+        haystack = " ".join(
+            [
+                row.get("tag_original") or "",
+                row.get("tag_norm") or "",
+                row.get("description") or "",
+                row.get("listed_area") or "",
+                row.get("manufacturer") or "",
+                row.get("model") or "",
+            ]
+        ).casefold()
+        if needle not in haystack:
+            continue
+        tag = row.get("tag_original") or ""
+        found.append(
+            {
+                "id": row["id"],
+                "tag": tag,
+                "description": row.get("description") or "",
+                "area": row.get("listed_area") or "",
+                "covered": row["id"] in data["covered"],
+                "rank": 0 if (row.get("tag_norm") or "").casefold().startswith(needle) or tag.casefold().startswith(needle) else 1,
+            }
+        )
+    found.sort(key=lambda item: (item["rank"], item["tag"], item["description"]))
+    items = found[:limit]
+    for item in items:
+        item.pop("rank", None)
+    return {"items": items}
+
+
+def _primary_row_ids(data: dict, asset_id: str) -> set[str]:
+    ids = set()
+    if asset_id in data["by_id"]:
+        ids.add(asset_id)
+    for member in data["members"].get(asset_id, []):
+        if member.get("member_role") == "parent" and member.get("inventory_row_id"):
+            ids.add(member["inventory_row_id"])
+    return ids
+
+
+def _assert_not_machine_parent(conn: sqlite3.Connection, row_id: str) -> None:
+    hit = conn.execute(
+        """
+        SELECT 1
+        FROM machine_members mm
+        JOIN machines m ON m.id = mm.machine_id
+        WHERE mm.inventory_row_id = ? AND mm.member_role = 'parent'
+          AND mm.link_status = 'active' AND m.status != 'dissolved'
+        """,
+        (row_id,),
+    ).fetchone()
+    if hit:
+        raise ValueError("הפריט הזה הוא נכס ראשי עם כרטיס משלו. בחרו רכיב אחר, או פתחו את הכרטיס שלו.")
+
+
+def _release_row(conn: sqlite3.Connection, row_id: str, keep_asset_id: str) -> None:
+    _assert_not_machine_parent(conn, row_id)
+    conn.execute(
+        """
+        UPDATE machine_members
+        SET link_status = 'removed',
+            evidence = evidence || ' הועבר על ידי המשתמש. שורת המקור נשמרה.'
+        WHERE inventory_row_id = ? AND link_status = 'active' AND member_role != 'parent'
+          AND machine_id != ?
+        """,
+        (row_id, keep_asset_id),
+    )
+    conn.execute(
+        """
+        UPDATE asset_components
+        SET link_status = 'removed', user_locked = 1, updated_at = updated_at
+        WHERE inventory_row_id = ? AND asset_id != ? AND link_status = 'active'
+        """,
+        (row_id, keep_asset_id),
+    )
+
+
+def _place_row_component(conn: sqlite3.Connection, asset_id: str, row: dict, created_at: str, explanation: str) -> str:
+    component_id = "CMP-" + _digest(f"row|{row['id']}")
+    existing = conn.execute("SELECT id FROM asset_components WHERE id = ?", (component_id,)).fetchone()
+    if existing:
+        conn.execute(
+            """
+            UPDATE asset_components
+            SET asset_id = ?, tag_norm = ?, tag_original = ?, inventory_row_id = ?, origin = 'user',
+                link_status = 'active', user_locked = 1, explanation = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                asset_id,
+                row.get("tag_norm") or "",
+                row.get("tag_original") or row.get("tag_norm") or "",
+                row["id"],
+                explanation,
+                created_at,
+                component_id,
+            ),
+        )
+    else:
+        conn.execute(
+            """
+            INSERT INTO asset_components (
+              id, asset_id, tag_norm, tag_original, name, description, notes, inventory_row_id,
+              origin, link_status, user_locked, explanation, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, '', '', '', ?, 'user', 'active', 1, ?, ?, ?)
+            """,
+            (
+                component_id,
+                asset_id,
+                row.get("tag_norm") or "",
+                row.get("tag_original") or row.get("tag_norm") or "",
+                row["id"],
+                explanation,
+                created_at,
+                created_at,
+            ),
+        )
+    return component_id
+
+
+def update_components(conn: sqlite3.Connection, asset_id: str, body: dict, created_at: str) -> dict:
+    if not _find_asset(conn, asset_id):
+        raise LookupError("הנכס לא נמצא.")
+    action = body.get("action") or ""
+    if action == "add_existing":
+        row_ids = [str(item).strip() for item in (body.get("row_ids") or []) if str(item).strip()]
+        if not row_ids:
+            raise ValueError("צריך לבחור לפחות פריט אחד מהמלאי.")
+        data = _load(conn)
+        primary = _primary_row_ids(data, asset_id)
+        rows = []
+        for row_id in row_ids:
+            row = data["by_id"].get(row_id)
+            if not row:
+                raise ValueError("הפריט לא נמצא במלאי. לא נוצר פריט חדש.")
+            if row_id in primary:
+                raise ValueError("אי אפשר לצרף את הנכס כרכיב של עצמו.")
+            _assert_not_machine_parent(conn, row_id)
+            rows.append(row)
+        explanation = "המשתמש הוסיף פריט קיים מהמלאי. שורת המקור נשמרה."
+        for row in rows:
+            _release_row(conn, row["id"], asset_id)
+            _place_row_component(conn, asset_id, row, created_at, explanation)
+        log_change(
+            conn,
+            actor=ACTOR_USER,
+            action="add_component",
+            entity_type="asset",
+            entity_id=asset_id,
+            prior=None,
+            new={"row_ids": row_ids},
+            created_at=created_at,
+        )
+        return asset_detail(conn, asset_id)
+    if action == "create":
+        tag = (body.get("tag") or "").strip()
+        name = (body.get("name") or "").strip()
+        description = (body.get("description") or "").strip()
+        notes = (body.get("notes") or "").strip()
+        if len(tag) < 1 and len(name) < 1:
+            raise ValueError("צריך תג או שם לרכיב.")
+        tag_norm = tag.upper()
+        if tag_norm:
+            hits = conn.execute(
+                "SELECT id FROM inventory_rows WHERE kind = 'equipment' AND tag_norm = ?",
+                (tag_norm,),
+            ).fetchall()
+            if len(hits) == 1:
+                raise ValueError("התג כבר קיים במלאי. הוסיפו אותו כפריט קיים, בלי ליצור רכיב כפול.")
+            if len(hits) > 1:
+                raise ValueError("יש יותר מרשומה אחת עם התג הזה. לא נוצר רכיב חדש.")
+        component_id = "CMP-" + _digest(f"new|{asset_id}|{tag_norm}|{name}|{created_at}")
+        conn.execute(
+            """
+            INSERT INTO asset_components (
+              id, asset_id, tag_norm, tag_original, name, description, notes, inventory_row_id,
+              origin, link_status, user_locked, explanation, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 'user', 'active', 1, ?, ?, ?)
+            """,
+            (
+                component_id,
+                asset_id,
+                tag_norm,
+                tag,
+                name,
+                description,
+                notes,
+                "נוצר בטופס על ידי המשתמש. לא נוצרה שורת מקור ולא הומצא מספר סידורי.",
+                created_at,
+                created_at,
+            ),
+        )
+        log_change(
+            conn,
+            actor=ACTOR_USER,
+            action="create_component",
+            entity_type="asset",
+            entity_id=asset_id,
+            prior=None,
+            new={"id": component_id, "tag": tag, "name": name},
+            created_at=created_at,
+        )
+        return asset_detail(conn, asset_id)
+    if action == "remove":
+        return _remove_component(conn, asset_id, str(body.get("component_id") or ""), created_at)
+    if action == "move":
+        target = str(body.get("target_asset_id") or "").strip()
+        if not target or target == asset_id:
+            raise ValueError("צריך לבחור נכס אחר.")
+        if not _find_asset(conn, target):
+            raise ValueError("הנכס שנבחר לא נמצא. לא נוצר נכס חדש.")
+        _move_component(conn, asset_id, str(body.get("component_id") or ""), target, created_at)
+        return asset_detail(conn, asset_id)
+    raise ValueError("אפשר להוסיף, ליצור, להסיר או להעביר רכיב.")
+
+
+def _remove_component(conn: sqlite3.Connection, asset_id: str, component_id: str, created_at: str) -> dict:
+    if not component_id:
+        raise ValueError("צריך לבחור רכיב.")
+    linked = conn.execute(
+        "SELECT * FROM asset_components WHERE id = ? AND asset_id = ? AND link_status = 'active'",
+        (component_id, asset_id),
+    ).fetchone()
+    if linked:
+        conn.execute(
+            "UPDATE asset_components SET link_status = 'removed', user_locked = 1, updated_at = ? WHERE id = ?",
+            (created_at, component_id),
+        )
+        log_change(conn, actor=ACTOR_USER, action="remove_component", entity_type="asset", entity_id=asset_id, prior={"id": component_id}, new={"removed": component_id}, created_at=created_at)
+        return asset_detail(conn, asset_id)
+    member = conn.execute(
+        "SELECT * FROM machine_members WHERE id = ? AND machine_id = ? AND link_status = 'active'",
+        (component_id, asset_id),
+    ).fetchone()
+    if not member:
+        raise LookupError("הרכיב לא נמצא בכרטיס.")
+    if member["member_role"] == "parent":
+        raise ValueError("אי אפשר להסיר את הרכיב הראשי מהכרטיס.")
+    conn.execute(
+        """
+        UPDATE machine_members
+        SET link_status = 'removed',
+            evidence = evidence || ' הוסר על ידי המשתמש. שורת המקור נשמרה.'
+        WHERE id = ?
+        """,
+        (component_id,),
+    )
+    if member["inventory_row_id"]:
+        conn.execute(
+            """
+            UPDATE asset_components
+            SET link_status = 'removed', user_locked = 1, updated_at = ?
+            WHERE inventory_row_id = ? AND asset_id = ? AND link_status = 'active'
+            """,
+            (created_at, member["inventory_row_id"], asset_id),
+        )
+    log_change(conn, actor=ACTOR_USER, action="remove_component", entity_type="asset", entity_id=asset_id, prior={"tag": member["tag_norm"]}, new={"removed": member["tag_norm"]}, created_at=created_at)
+    return asset_detail(conn, asset_id)
+
+
+def _move_component(conn: sqlite3.Connection, asset_id: str, component_id: str, target: str, created_at: str) -> None:
+    if not component_id:
+        raise ValueError("צריך לבחור רכיב.")
+    explanation = "המשתמש העביר את הרכיב לנכס הזה."
+    linked = conn.execute(
+        "SELECT * FROM asset_components WHERE id = ? AND asset_id = ? AND link_status = 'active'",
+        (component_id, asset_id),
+    ).fetchone()
+    if linked:
+        if linked["inventory_row_id"]:
+            _release_row(conn, linked["inventory_row_id"], target)
+        conn.execute(
+            """
+            UPDATE asset_components
+            SET asset_id = ?, link_status = 'active', user_locked = 1, origin = 'user', explanation = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (target, explanation, created_at, component_id),
+        )
+        log_change(conn, actor=ACTOR_USER, action="move_component", entity_type="asset", entity_id=asset_id, prior={"id": component_id, "asset_id": asset_id}, new={"asset_id": target}, created_at=created_at)
+        log_change(conn, actor=ACTOR_USER, action="move_component", entity_type="asset", entity_id=target, prior=None, new={"id": component_id}, created_at=created_at)
+        return
+    member = conn.execute(
+        "SELECT * FROM machine_members WHERE id = ? AND machine_id = ? AND link_status = 'active'",
+        (component_id, asset_id),
+    ).fetchone()
+    if not member:
+        raise LookupError("הרכיב לא נמצא בכרטיס.")
+    if member["member_role"] == "parent":
+        raise ValueError("אי אפשר להעביר את הרכיב הראשי.")
+    conn.execute(
+        """
+        UPDATE machine_members
+        SET link_status = 'removed',
+            evidence = evidence || ' הועבר לנכס אחר על ידי המשתמש. שורת המקור נשמרה.'
+        WHERE id = ?
+        """,
+        (component_id,),
+    )
+    if member["inventory_row_id"]:
+        row = conn.execute("SELECT * FROM inventory_rows WHERE id = ?", (member["inventory_row_id"],)).fetchone()
+        if not row:
+            raise LookupError("שורת המקור לא נמצאה.")
+        _release_row(conn, row["id"], target)
+        _place_row_component(conn, target, dict(row), created_at, explanation)
+    else:
+        moved_id = "CMP-" + _digest(f"member|{member['id']}")
+        conn.execute(
+            """
+            INSERT INTO asset_components (
+              id, asset_id, tag_norm, tag_original, name, description, notes, inventory_row_id,
+              origin, link_status, user_locked, explanation, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, '', '', '', NULL, 'user', 'active', 1, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+              asset_id = excluded.asset_id, link_status = 'active', user_locked = 1, explanation = excluded.explanation, updated_at = excluded.updated_at
+            """,
+            (
+                moved_id,
+                target,
+                member["tag_norm"],
+                member["tag_original"],
+                explanation,
+                created_at,
+                created_at,
+            ),
+        )
+    log_change(conn, actor=ACTOR_USER, action="move_component", entity_type="asset", entity_id=asset_id, prior={"tag": member["tag_norm"]}, new={"asset_id": target}, created_at=created_at)
+    log_change(conn, actor=ACTOR_USER, action="move_component", entity_type="asset", entity_id=target, prior=None, new={"tag": member["tag_norm"]}, created_at=created_at)

@@ -32,7 +32,7 @@ p { margin: 0 0 8px; }
 .stat b { display: block; font-size: 1.8rem; }
 .filters { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
 .filters button, .btn, .btn-primary { border: 1px solid var(--line); background: #fff; border-radius: 999px; padding: 8px 12px; }
-.filters button.on, .btn-primary { background: var(--green); color: #fff; border-color: var(--green); }
+.filters button.on, .btn.on, .btn-primary { background: var(--green); color: #fff; border-color: var(--green); }
 .row { width: 100%; display: block; margin-bottom: 8px; }
 .tag { unicode-bidi: isolate; direction: ltr; font-weight: 650; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; }

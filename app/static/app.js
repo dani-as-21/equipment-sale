@@ -12,6 +12,19 @@ const S = {
   tasks: [],
   uploads: [],
   searchHits: [],
+  assetId: "",
+  addMode: "",
+  itemQuery: "",
+  itemHits: [],
+  pickedRows: {},
+  moveId: "",
+  moveQuery: "",
+  moveHits: [],
+  movePick: "",
+  assignFile: "",
+  assignQuery: "",
+  assignHits: [],
+  assignPick: "",
 };
 
 const $ = (html) => {
@@ -100,17 +113,70 @@ function renderInventory() {
     ${rows || `<p class="muted">אין נכסים בסינון הזה.</p>`}`;
 }
 
+function renderAddPanel() {
+  if (!S.addMode) return "";
+  if (S.addMode === "choose") {
+    return `<div class="card" data-add-panel>
+      <p>שתי אפשרויות:</p>
+      <div class="actions">
+        <button class="btn" type="button" data-action="add-existing">הוספת פריט קיים</button>
+        <button class="btn" type="button" data-action="add-new">יצירת רכיב חדש</button>
+      </div>
+    </div>`;
+  }
+  if (S.addMode === "existing") {
+    const hits = (S.itemHits || []).map((item) => `
+      <button class="btn ${S.pickedRows[item.id] ? "on" : ""}" type="button" data-action="toggle-item" data-row="${esc(item.id)}">
+        ${item.tag ? tag(item.tag) : ""} ${esc(item.description || "")}${item.area ? " · " + tag(item.area) : ""}
+      </button>`).join("");
+    return `<form class="card" data-action="search-items" data-add-panel>
+      <p><b>הוספת פריט קיים</b></p>
+      <label>חיפוש במלאי<input name="q" value="${esc(S.itemQuery)}" placeholder="תג, שם או אזור"></label>
+      <button class="btn" type="submit">חפש</button>
+      <div class="actions">${hits}</div>
+      <button class="btn-primary" type="button" data-action="confirm-add">הוסף את הפריטים שנבחרו</button>
+    </form>`;
+  }
+  return `<form class="card" data-action="create-component" data-add-panel>
+    <p><b>יצירת רכיב חדש</b></p>
+    <label>תג / מזהה<input name="tag" placeholder="D-7682/8"></label>
+    <label>שם<input name="name"></label>
+    <label>תיאור<input name="description"></label>
+    <label>הערות<textarea name="notes"></textarea></label>
+    <button class="btn-primary" type="submit">הוסף רכיב</button>
+  </form>`;
+}
+
+function renderMovePanel() {
+  const hits = (S.moveHits || []).map((asset) => `
+    <button class="btn ${S.movePick === asset.id ? "on" : ""}" type="button" data-action="choose-move" data-target="${esc(asset.id)}">
+      ${esc(asset.name)} ${asset.tag ? tag(asset.tag) : ""}
+    </button>`).join("");
+  return `<form data-action="search-move">
+    <label>חיפוש נכס<input name="q" value="${esc(S.moveQuery)}" placeholder="תג או שם"></label>
+    <button class="btn" type="submit">חפש</button>
+    <div class="actions">${hits}</div>
+    <button class="btn-primary" type="button" data-action="confirm-move">אשר העברה</button>
+  </form>`;
+}
+
 function renderAsset() {
   const asset = S.asset;
   if (!asset) return `<p>טוען את הכרטיס…</p>`;
   const tech = (asset.technical || []).map((item) => `<p><b>${esc(item.label)}:</b> ${item.label === "תיאור" ? esc(item.value) : tag(item.value)}<br><span class="muted">${esc(item.source)}</span></p>`).join("");
   const components = (asset.components || []).map((item) => `
     <div class="card" style="margin-bottom:8px">
-      <b>${tag(item.tag)}</b> · ${esc(item.role)} · ${esc(item.type_label || "")}
+      <b>${item.tag ? tag(item.tag) : esc(item.name || "רכיב")}</b> · ${esc(item.role)}${item.type_label ? " · " + esc(item.type_label) : ""}
+      ${item.name && item.tag ? `<p>${esc(item.name)}</p>` : ""}
       <p>${esc(item.description || "")}</p>
+      ${item.notes ? `<p class="muted">${esc(item.notes)}</p>` : ""}
       <p>${esc(item.confidence_label)}. ${esc(item.explanation || "")}</p>
       <p class="muted">${esc(item.source)}</p>
-      ${item.tag_norm ? `<button class="btn" type="button" data-action="reject" data-tag="${esc(item.tag_norm)}">הרכיב לא שייך</button>` : ""}
+      ${item.removable ? `<div class="actions">
+        <button class="btn" type="button" data-action="remove-component" data-component="${esc(item.id)}">הסר רכיב</button>
+        <button class="btn" type="button" data-action="move-component" data-component="${esc(item.id)}">העבר לנכס אחר</button>
+      </div>` : ""}
+      ${S.moveId === item.id ? renderMovePanel() : ""}
     </div>`).join("");
   const files = (asset.files || []).map((file) => `<p><b>${tag(file.name)}</b> · ${esc(file.doc_type)} · ${esc(file.confidence_label)}<br>${esc(file.summary || "")}</p>`).join("");
   const evidence = (asset.evidence || []).map((item) => `
@@ -132,7 +198,9 @@ function renderAsset() {
     <h2>מידע טכני</h2>
     <div class="card">${tech || `<p class="muted">אין במקור שדות טכניים לכרטיס הזה. לא מולאו ערכים.</p>`}</div>
     <h2>רכיבים</h2>
-    ${components || `<p class="muted">זה נכס בודד. אין רכיבים מקושרים.</p>`}
+    <div class="actions"><button class="btn-primary" type="button" data-action="add-component">הוספת רכיב</button></div>
+    ${renderAddPanel()}
+    ${components || `<p class="muted">אין רכיבים מקושרים.</p>`}
     <h2>מה חסר או לא סגור</h2>
     <div class="card">${(asset.questions || []).map((item) => `<p>${esc(item)}</p>`).join("") || `<p class="muted">אין שאלה פתוחה על הכרטיס.</p>`}</div>
     <h2>קבצים</h2>
@@ -178,6 +246,19 @@ function renderTasks() {
   return `<div class="top"><h1>שאלות</h1></div><p class="muted">רק מה שלא סגור: קשר לא ודאי, שם כללי, תווית סטטוס, או קובץ בלי שיוך.</p>${items || `<p>אין שאלות פתוחות.</p>`}`;
 }
 
+function renderAssignPanel() {
+  const hits = (S.assignHits || []).map((asset) => `
+    <button class="btn ${S.assignPick === asset.id ? "on" : ""}" type="button" data-action="choose-assign" data-target="${esc(asset.id)}">
+      ${esc(asset.name)} ${asset.tag ? tag(asset.tag) : ""}
+    </button>`).join("");
+  return `<form data-action="search-assign" data-assign-panel>
+    <label>חיפוש נכס<input name="q" value="${esc(S.assignQuery)}" placeholder="תג או שם"></label>
+    <button class="btn" type="submit">חפש</button>
+    <div class="actions">${hits}</div>
+    <button class="btn-primary" type="button" data-action="confirm-assign">אשר שיוך</button>
+  </form>`;
+}
+
 function renderUpload() {
   const files = (S.uploads || []).map((file) => `
     <article class="card" style="margin-bottom:8px" data-file="${esc(file.id)}">
@@ -188,14 +269,14 @@ function renderUpload() {
       ${file.user_locked ? `<p class="muted">השיוך אושר ולא יוחלף אוטומטית.</p>` : `
         <div class="actions">
           ${(file.links || []).length ? `<button class="btn-primary" type="button" data-confirm="${esc(file.id)}">אשר את השיוך</button>` : ""}
-          <button class="btn" type="button" data-assign="${esc(file.id)}">שייך לנכס אחר</button>
+          <button class="btn" type="button" data-action="open-assign" data-file="${esc(file.id)}">שייך לנכס אחר</button>
         </div>
+        ${S.assignFile === file.id ? renderAssignPanel() : ""}
         <form data-action="create-asset" data-file="${esc(file.id)}">
           <label>נכס חדש, רק אם אין רשומה<input name="name" placeholder="שם שהקלדתם"></label>
           <button class="btn" type="submit">צור נכס ושייך</button>
         </form>`}
     </article>`).join("");
-  const hits = (S.searchHits || []).map((asset) => `<button class="btn" type="button" data-pick="${esc(asset.id)}" data-file="${esc(S.pickFile || "")}">${esc(asset.name)} ${asset.tag ? tag(asset.tag) : ""}</button>`).join("");
   return `
     <div class="top"><h1>העלאה</h1></div>
     <p>אפשר להעלות קובץ, כמה קבצים, או להדביק טקסט. בלי לבחור קודם נכס. שיוך לא ודאי מחכה לאישור.</p>
@@ -204,7 +285,6 @@ function renderUpload() {
       <label>או טקסט<textarea name="note" placeholder="הדביקו כאן מידע, מכתב, או הצעה"></textarea></label>
       <button class="btn-primary" type="submit">קלוט</button>
     </form>
-    ${S.pickFile ? `<form class="card" data-action="find-asset"><label>חיפוש נכס לשיוך<input name="q" placeholder="תג או שם"></label><div class="actions">${hits}</div></form>` : ""}
     ${files || `<p class="muted">עדיין לא הועלה כאן קובץ.</p>`}`;
 }
 
@@ -222,10 +302,22 @@ async function loadInventory() {
   S.total = body.total || 0;
   render();
 }
+function resetAssetTools() {
+  S.addMode = "";
+  S.itemHits = [];
+  S.pickedRows = {};
+  S.moveId = "";
+  S.moveHits = [];
+  S.movePick = "";
+}
+
 async function loadAsset(id) {
+  if (S.assetId !== id) resetAssetTools();
+  S.assetId = id;
   S.asset = await api("/api/assets/" + encodeURIComponent(id));
   S.screen = "asset";
-  location.hash = "#/asset/" + encodeURIComponent(id);
+  const next = "#/asset/" + encodeURIComponent(id);
+  if (location.hash !== next) location.hash = next;
   render();
 }
 async function loadTasks() {
@@ -252,6 +344,7 @@ async function go(screen) {
 document.getElementById("app").addEventListener("click", async (event) => {
   const button = event.target.closest("button");
   if (!button) return;
+  try {
   if (button.dataset.go) {
     S.category = button.dataset.category || "";
     S.attention = button.dataset.attention || "";
@@ -277,9 +370,76 @@ document.getElementById("app").addEventListener("click", async (event) => {
     render();
     return;
   }
-  if (button.dataset.action === "reject" && S.asset) {
-    S.asset = await api(`/api/assets/${encodeURIComponent(S.asset.id)}/relationship`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "reject", tag_norms: [button.dataset.tag] }) });
-    S.notice = "הרכיב הוצא מהמכונה. שורת המקור נשארה.";
+  if (button.dataset.action === "add-component") {
+    S.addMode = S.addMode ? "" : "choose";
+    S.moveId = "";
+    render();
+    return;
+  }
+  if (button.dataset.action === "add-existing") {
+    S.addMode = "existing";
+    render();
+    document.querySelector("[data-add-panel]")?.scrollIntoView({ block: "nearest" });
+    return;
+  }
+  if (button.dataset.action === "add-new") {
+    S.addMode = "create";
+    render();
+    return;
+  }
+  if (button.dataset.action === "toggle-item") {
+    const rowId = button.dataset.row;
+    if (S.pickedRows[rowId]) delete S.pickedRows[rowId];
+    else S.pickedRows[rowId] = true;
+    render();
+    return;
+  }
+  if (button.dataset.action === "confirm-add" && S.asset) {
+    const rowIds = Object.keys(S.pickedRows);
+    if (!rowIds.length) {
+      S.notice = "צריך לבחור לפחות פריט אחד.";
+      render();
+      return;
+    }
+    S.asset = await api(`/api/assets/${encodeURIComponent(S.asset.id)}/components`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "add_existing", row_ids: rowIds }) });
+    S.notice = "הפריטים נוספו כרכיבים.";
+    S.addMode = "";
+    S.pickedRows = {};
+    S.itemHits = [];
+    render();
+    return;
+  }
+  if (button.dataset.action === "remove-component" && S.asset) {
+    S.asset = await api(`/api/assets/${encodeURIComponent(S.asset.id)}/components`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "remove", component_id: button.dataset.component }) });
+    S.notice = "הרכיב הוסר. שורת המקור, אם הייתה, נשארה.";
+    if (S.moveId === button.dataset.component) S.moveId = "";
+    render();
+    return;
+  }
+  if (button.dataset.action === "move-component") {
+    S.moveId = button.dataset.component;
+    S.moveHits = [];
+    S.movePick = "";
+    S.addMode = "";
+    render();
+    return;
+  }
+  if (button.dataset.action === "choose-move") {
+    S.movePick = button.dataset.target;
+    render();
+    return;
+  }
+  if (button.dataset.action === "confirm-move" && S.asset) {
+    if (!S.movePick) {
+      S.notice = "צריך לבחור נכס.";
+      render();
+      return;
+    }
+    S.asset = await api(`/api/assets/${encodeURIComponent(S.asset.id)}/components`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "move", component_id: S.moveId, target_asset_id: S.movePick }) });
+    S.notice = "הרכיב הועבר לנכס שנבחר.";
+    S.moveId = "";
+    S.movePick = "";
+    S.moveHits = [];
     render();
     return;
   }
@@ -295,17 +455,36 @@ document.getElementById("app").addEventListener("click", async (event) => {
     await loadUploads();
     return;
   }
-  if (button.dataset.assign) {
-    S.pickFile = button.dataset.assign;
-    S.searchHits = [];
+  if (button.dataset.action === "open-assign") {
+    S.assignFile = button.dataset.file;
+    S.assignHits = [];
+    S.assignPick = "";
+    S.assignQuery = "";
+    render();
+    document.querySelector("[data-assign-panel]")?.scrollIntoView({ block: "nearest" });
+    return;
+  }
+  if (button.dataset.action === "choose-assign") {
+    S.assignPick = button.dataset.target;
     render();
     return;
   }
-  if (button.dataset.pick && S.pickFile) {
-    await api("/api/uploads/" + encodeURIComponent(S.pickFile), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "assign", asset_ids: [button.dataset.pick] }) });
-    S.pickFile = "";
-    S.notice = "הקובץ שויך לנכס שבחרתם.";
+  if (button.dataset.action === "confirm-assign" && S.assignFile) {
+    if (!S.assignPick) {
+      S.notice = "צריך לבחור נכס.";
+      render();
+      return;
+    }
+    await api("/api/uploads/" + encodeURIComponent(S.assignFile), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "assign", asset_ids: [S.assignPick] }) });
+    S.assignFile = "";
+    S.assignPick = "";
+    S.assignHits = [];
+    S.notice = "הפריט שויך לנכס שנבחר.";
     await loadUploads();
+  }
+  } catch (error) {
+    S.notice = error.message;
+    render();
   }
 });
 
@@ -338,10 +517,44 @@ document.getElementById("app").addEventListener("submit", async (event) => {
       await loadUploads();
       return;
     }
-    if (form.dataset.action === "find-asset") {
-      const body = await api("/api/assets?q=" + encodeURIComponent(data.get("q") || ""));
-      S.searchHits = body.assets || [];
+    if (form.dataset.action === "search-items") {
+      S.itemQuery = String(data.get("q") || "");
+      const body = await api("/api/inventory-items?q=" + encodeURIComponent(S.itemQuery));
+      S.itemHits = body.items || [];
+      S.addMode = "existing";
       render();
+      return;
+    }
+    if (form.dataset.action === "create-component" && S.asset) {
+      S.asset = await api(`/api/assets/${encodeURIComponent(S.asset.id)}/components`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "create",
+          tag: data.get("tag") || "",
+          name: data.get("name") || "",
+          description: data.get("description") || "",
+          notes: data.get("notes") || "",
+        }),
+      });
+      S.notice = "הרכיב נוסף לכרטיס.";
+      S.addMode = "";
+      render();
+      return;
+    }
+    if (form.dataset.action === "search-move") {
+      S.moveQuery = String(data.get("q") || "");
+      const body = await api("/api/assets?q=" + encodeURIComponent(S.moveQuery));
+      S.moveHits = body.assets || [];
+      render();
+      return;
+    }
+    if (form.dataset.action === "search-assign") {
+      S.assignQuery = String(data.get("q") || "");
+      const body = await api("/api/assets?q=" + encodeURIComponent(S.assignQuery));
+      S.assignHits = body.assets || [];
+      render();
+      document.querySelector("[data-assign-panel]")?.scrollIntoView({ block: "nearest" });
       return;
     }
     if (form.dataset.action === "evidence" && S.asset) {

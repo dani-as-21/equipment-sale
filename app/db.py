@@ -473,6 +473,26 @@ CREATE TABLE IF NOT EXISTS valuation_notes (
 
 CREATE INDEX IF NOT EXISTS idx_project_links_asset ON project_file_links(asset_id);
 CREATE INDEX IF NOT EXISTS idx_valuation_notes_asset ON valuation_notes(asset_id);
+
+CREATE TABLE IF NOT EXISTS asset_components (
+  id TEXT PRIMARY KEY,
+  asset_id TEXT NOT NULL,
+  tag_norm TEXT NOT NULL DEFAULT '',
+  tag_original TEXT NOT NULL DEFAULT '',
+  name TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  notes TEXT NOT NULL DEFAULT '',
+  inventory_row_id TEXT,
+  origin TEXT NOT NULL,
+  link_status TEXT NOT NULL,
+  user_locked INTEGER NOT NULL DEFAULT 0,
+  explanation TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_asset_components_asset ON asset_components(asset_id);
+CREATE INDEX IF NOT EXISTS idx_asset_components_row ON asset_components(inventory_row_id);
 """
 
 

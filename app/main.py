@@ -55,6 +55,7 @@ async def lifespan(app: FastAPI):
         machines.ensure_machines(conn, logic.now_iso())
         from app import product
 
+        product.ensure_slash_components(conn, logic.now_iso())
         product.ensure_questions(conn, logic.now_iso())
         conn.commit()
     finally:
@@ -877,6 +878,13 @@ def create_app() -> FastAPI:
 
         return product.list_assets(conn, q=q, category=category, label=label, attention=attention, offset=max(offset, 0))
 
+    @app.get("/api/inventory-items")
+    def product_inventory_items(request: Request, conn=Depends(get_conn), q: str = ""):
+        require_user(request)
+        from app import product
+
+        return product.search_inventory(conn, q)
+
     @app.get("/api/assets/{asset_id}")
     def product_asset(asset_id: str, request: Request, conn=Depends(get_conn)):
         require_user(request)
@@ -894,6 +902,20 @@ def create_app() -> FastAPI:
 
         try:
             result = product.set_relationship(conn, asset_id, body, logic.now_iso())
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        conn.commit()
+        return result
+
+    @app.post("/api/assets/{asset_id}/components")
+    def product_components(asset_id: str, request: Request, body: dict, conn=Depends(get_conn)):
+        require_user(request)
+        from app import product
+
+        try:
+            result = product.update_components(conn, asset_id, body, logic.now_iso())
         except LookupError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ValueError as exc:
