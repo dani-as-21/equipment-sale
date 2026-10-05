@@ -25,6 +25,7 @@ const S = {
   assignQuery: "",
   assignHits: [],
   assignPick: "",
+  estimating: false,
 };
 
 const $ = (html) => {
@@ -160,6 +161,42 @@ function renderMovePanel() {
   </form>`;
 }
 
+function renderEstimate(estimate) {
+  if (!estimate) return "";
+  if (estimate.status !== "estimated") {
+    const required = (estimate.required || []).map((item) => `<li>${esc(item)}</li>`).join("");
+    const helpful = (estimate.helpful || []).map((item) => `<li>${esc(item)}</li>`).join("");
+    return `<div class="card" data-estimate="insufficient">
+      <h2>${esc(estimate.headline || "")}</h2>
+      <p>${esc(estimate.message || "")}</p>
+      ${estimate.scope ? `<p>${esc(estimate.scope)}</p>` : ""}
+      <h3>נדרש</h3>
+      ${required ? `<ul>${required}</ul>` : `<p class="muted">אין פריט נדרש נוסף.</p>`}
+      <h3>מועיל</h3>
+      ${helpful ? `<ul>${helpful}</ul>` : `<p class="muted">אין פריט מועיל נוסף.</p>`}
+      ${estimate.research_note ? `<p class="muted">${esc(estimate.research_note)}</p>` : ""}
+      ${estimate.research_url ? `<p><a href="${esc(estimate.research_url)}" target="_blank" rel="noreferrer">מקור החיפוש</a></p>` : ""}
+    </div>`;
+  }
+  const figures = (estimate.figures || []).map((figure) => `
+    <div class="card">
+      <h3>${esc(figure.label)}</h3>
+      <p><b>${tag(figure.text)}</b></p>
+      <p>${esc(figure.explanation || "")}</p>
+    </div>`).join("");
+  const basis = (estimate.basis || []).map((item) => `
+    <p><b>${esc(item.label)}</b>${item.amount_text ? " · " + tag(item.amount_text) : ""}
+    ${item.detail ? `<br>${esc(item.detail)}` : ""}
+    ${item.url ? `<br><a href="${esc(item.url)}" target="_blank" rel="noreferrer">${esc(item.url)}</a>` : ""}</p>`).join("");
+  return `<div data-estimate="estimated">
+    <p>${esc(estimate.reasoning || "")}</p>
+    <div class="figures">${figures}</div>
+    <h3>על מה זה נשען</h3>
+    <div class="card">${basis || `<p class="muted">אין נקודת בסיס.</p>`}</div>
+    ${estimate.research_note ? `<p class="muted">${esc(estimate.research_note)}</p>` : ""}
+  </div>`;
+}
+
 function renderAsset() {
   const asset = S.asset;
   if (!asset) return `<p>טוען את הכרטיס…</p>`;
@@ -194,7 +231,12 @@ function renderAsset() {
       ${asset.confidence_label ? `<p>קשר: ${esc(asset.confidence_label)}</p>` : ""}
       ${(asset.labels || []).length ? `<p class="chips">${asset.labels.map((label) => `<span class="chip">${tag(label)}</span>`).join("")}</p>` : ""}
       ${asset.kind === "machine" && asset.confidence !== "confirmed" ? `<button class="btn-primary" type="button" data-action="confirm-machine">אשר שהרכיבים שייכים למכונה</button>` : ""}
+      <div class="actions">
+        <button class="btn-primary estimate" type="button" data-action="estimate" ${S.estimating ? "disabled" : ""}>${S.estimating ? "מחשב הערכה…" : "הערכת שווי"}</button>
+      </div>
+      <p class="muted">Estimate Value. החישוב משתמש במידע שנשמר לנכס הזה ובחיפוש שוק עדכני. בלי ראיות לא מוצג מספר.</p>
     </div>
+    ${renderEstimate(asset.estimate)}
     <h2>מידע טכני</h2>
     <div class="card">${tech || `<p class="muted">אין במקור שדות טכניים לכרטיס הזה. לא מולאו ערכים.</p>`}</div>
     <h2>רכיבים</h2>
@@ -207,7 +249,7 @@ function renderAsset() {
     <div class="card">${files || `<p class="muted">עדיין אין קובץ מאושר. מעלים במסך ההעלאה.</p>`}</div>
     <h2>ראיות שווי</h2>
     <div class="card">
-      <p class="muted">נשמר רק מה שהוזן. אין בגרסה הזו טווח שווי.</p>
+      <p class="muted">נשמר רק מה שהוזן. הערכת השווי למעלה משתמשת בסכומים האלה, בלי להמציא מחיר.</p>
       ${evidence}
       <form data-action="evidence">
         <label>סוג הראיה<select name="value_kind">
@@ -268,6 +310,10 @@ function renderFileBody(file) {
         <button class="btn-primary" type="button" data-go="inventory" data-category="${esc(file.inventory_category || "lab")}" data-query="">${label}</button>
         <button class="btn" type="button" data-action="dismiss-upload" data-file="${esc(file.id)}">סגור</button>
       </div>`;
+  }
+  if (file.status === "filed") {
+    const opens = (file.links || []).map((link) => `<button class="btn-primary" type="button" data-asset="${esc(link.asset_id)}">אל הנכס ${tag(link.tag_norm || "")}</button>`).join("");
+    return `<p>${esc(file.summary || "")}</p><div class="actions">${opens}</div>`;
   }
   if (file.imported_list || file.status === "imported") {
     const query = (file.added_tags || [])[0] || "";
@@ -474,6 +520,19 @@ document.getElementById("app").addEventListener("click", async (event) => {
     const note = window.prompt("הערה, אם יש") || "";
     await api("/api/tasks/" + encodeURIComponent(button.dataset.task), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status: button.dataset.status, note }) });
     await loadTasks();
+    return;
+  }
+  if (button.dataset.action === "estimate" && S.asset) {
+    S.estimating = true;
+    S.notice = "";
+    render();
+    try {
+      S.asset.estimate = await api("/api/assets/" + encodeURIComponent(S.asset.id) + "/estimate", { method: "POST" });
+      S.notice = S.asset.estimate.status === "estimated" ? "ההערכה חושבה מהמידע ומהחיפוש העדכני." : "אין די מידע להערכה. לא הומצא מספר.";
+    } finally {
+      S.estimating = false;
+      render();
+    }
     return;
   }
   if (button.dataset.confirm) {

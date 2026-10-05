@@ -938,6 +938,18 @@ def create_app() -> FastAPI:
         conn.commit()
         return result
 
+    @app.post("/api/assets/{asset_id}/estimate")
+    def product_estimate(asset_id: str, request: Request, conn=Depends(get_conn)):
+        require_user(request)
+        from app import product
+
+        try:
+            result = product.estimate_asset(conn, asset_id, logic.now_iso())
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        conn.commit()
+        return result
+
     @app.get("/api/tasks")
     def product_tasks(request: Request, conn=Depends(get_conn)):
         require_user(request)
