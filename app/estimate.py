@@ -299,6 +299,13 @@ def build_estimate(context: dict, research: dict | None) -> dict:
             basis.append(_basis_line({**item, "label": item.get("label") or "מחיר היצע"}))
         if len(used_market) > 4:
             basis.append({"label": "מחירי היצע נוספים", "detail": f"עוד {len(used_market) - 2} מחירים באותו מטבע נכנסו לטווח.", "url": "", "amount_text": ""})
+        seen_urls = set()
+        for item in used_market:
+            url = item.get("url") or ""
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            basis.append({"label": "מקור חיצוני", "detail": "מודעות שתאמו את היצרן והדגם ונכנסו לטווח.", "url": url, "amount_text": ""})
         for item in sorted(offers, key=lambda item: item["amount"])[:4]:
             basis.append(_basis_line({**item, "label": item.get("label") or "הצעת קונה"}))
         for item in sorted(sales, key=lambda item: item["amount"])[:3]:
