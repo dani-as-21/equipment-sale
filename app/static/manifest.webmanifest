@@ -1,10 +1,10 @@
 {
-  "name": "סיור ציוד",
-  "short_name": "סיור",
+  "name": "ציוד למכירה",
+  "short_name": "ציוד",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#efeae2",
-  "theme_color": "#0f5c50",
+  "background_color": "#f6f3ee",
+  "theme_color": "#1f3d36",
   "lang": "he",
   "dir": "rtl"
 }

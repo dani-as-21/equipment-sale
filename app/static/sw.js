@@ -1,5 +1,5 @@
-const CACHE = "capture-shell-v6";
-const SHELL = ["/", "/static/app.js", "/static/match.js", "/static/store.js", "/static/style.css", "/static/manifest.webmanifest"];
+const CACHE = "sale-shell-v4";
+const SHELL = ["/", "/static/app.js", "/static/style.css", "/static/manifest.webmanifest"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(SHELL)).then(() => self.skipWaiting()));
@@ -22,22 +22,4 @@ self.addEventListener("fetch", (event) => {
       })
       .catch(() => caches.match(event.request).then((cached) => cached || caches.match("/")))
   );
-});
-
-self.addEventListener("sync", (event) => {
-  if (event.tag === "capture-sync") {
-    event.waitUntil(
-      self.clients.matchAll({ type: "window" }).then((clients) => {
-        clients.forEach((client) => client.postMessage({ type: "sync" }));
-      })
-    );
-  }
-});
-
-self.addEventListener("message", (event) => {
-  if (event.data === "sync") {
-    self.clients.matchAll({ type: "window" }).then((clients) => {
-      clients.forEach((client) => client.postMessage({ type: "sync" }));
-    });
-  }
 });
