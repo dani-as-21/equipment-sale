@@ -219,6 +219,45 @@ def is_lab_banner(cells: list[str]) -> bool:
     return False
 
 
+LAB_HEADER_FIELDS = {
+    "instrument name": "description",
+    "name": "description",
+    "instrument tag no.": "tag",
+    "instrument tag": "tag",
+    "tag no.": "tag",
+    "tag": "tag",
+    "manufacturer": "manufacturer",
+    "model no.": "model",
+    "model": "model",
+    "model number": "model",
+    "serial no.": "serial",
+    "serial": "serial",
+    "serial number": "serial",
+    "date of installation": "installation",
+    "installation": "installation",
+    "install date": "installation",
+}
+
+
+def header_key(value: str) -> str:
+    return re.sub(r"\s+", " ", (value or "").strip().casefold())
+
+
+def lab_mapping_for(headers: list[str]) -> dict | None:
+    columns: dict[str, str] = {}
+    for header in headers:
+        field = LAB_HEADER_FIELDS.get(header_key(header))
+        if field and field not in columns and header.strip():
+            columns[field] = header.strip()
+    if not {"tag", "manufacturer", "model"} <= set(columns):
+        return None
+    return {"area_source": "unknown", "columns": columns}
+
+
+def _is_lab_header_cells(cells: list[str]) -> bool:
+    return lab_mapping_for(cells) is not None
+
+
 def read_lab_docx(path: Path) -> list[dict]:
     document = Document(str(path))
     headers = [
@@ -795,3 +834,136 @@ def preview_workbook(path: Path) -> dict:
             }
         )
     return {"sheets": sheet_info, "suggested_mapping": PLANT_MAPPING}
+
+
+def _records_from_header_rows(sheet_name: str, header_row: int, headers: list[str], data_rows: list[tuple[int, list[str]]], source_kind: str) -> list[dict]:
+    records = []
+    for row_number, cells in data_rows:
+        raw = {headers[index]: cells[index] if index < len(cells) else "" for index in range(len(headers)) if headers[index].strip()}
+        if not any(str(value).strip() for value in raw.values()):
+            continue
+        banner = _is_lab_header_cells([raw.get(header, "") for header in headers]) if source_kind == "lab" else False
+        records.append(
+            {
+                "sheet_name": sheet_name,
+                "original_row": row_number,
+                "raw": raw,
+                "source_kind": source_kind,
+                "banner": banner or (source_kind == "lab" and is_lab_banner([raw.get(header, "") for header in headers[:6]])),
+            }
+        )
+    return records
+
+
+def parse_lab_docx(path: Path) -> dict | None:
+    document = Document(str(path))
+    records: list[dict] = []
+    mapping = None
+    for table_index, table in enumerate(document.tables, start=1):
+        if not table.rows:
+            continue
+        headers = _lab_cells(table.rows[0])
+        table_mapping = lab_mapping_for(headers)
+        if not table_mapping:
+            continue
+        mapping = table_mapping
+        data_rows = []
+        for row_index, row in enumerate(table.rows, start=1):
+            if row_index == 1:
+                continue
+            data_rows.append((row_index, _lab_cells(row)))
+        records.extend(_records_from_header_rows(f"טבלה {table_index}", 1, headers, data_rows, "lab"))
+    if not mapping:
+        return None
+    return {"kind": "lab", "mapping": mapping, "records": records, "sheets": []}
+
+
+def _sheet_rows(worksheet) -> list[tuple[int, list[str]]]:
+    found = []
+    for index, row in enumerate(worksheet.iter_rows(max_col=20, values_only=True), start=1):
+        found.append((index, [cell_text(value) for value in row]))
+        if index >= 5000:
+            break
+    return found
+
+
+def parse_lab_xlsx(path: Path) -> dict | None:
+    workbook = openpyxl.load_workbook(path, read_only=True, data_only=False)
+    records: list[dict] = []
+    mapping = None
+    try:
+        for sheet_name in workbook.sheetnames:
+            rows = _sheet_rows(workbook[sheet_name])
+            header_at = None
+            headers: list[str] = []
+            for index, (row_number, cells) in enumerate(rows[:25]):
+                maybe = lab_mapping_for(cells)
+                if maybe:
+                    header_at = index
+                    headers = cells
+                    mapping = maybe
+                    break
+            if header_at is None:
+                continue
+            data_rows = [(row_number, cells) for row_number, cells in rows[header_at + 1 :]]
+            records.extend(_records_from_header_rows(sheet_name, rows[header_at][0], headers, data_rows, "lab"))
+    finally:
+        workbook.close()
+    if not mapping:
+        return None
+    return {"kind": "lab", "mapping": mapping, "records": records, "sheets": []}
+
+
+def parse_lab_csv(path: Path) -> dict | None:
+    text = path.read_text(encoding="utf-8-sig", errors="replace")
+    rows = list(csv.reader(io.StringIO(text)))
+    header_at = None
+    headers: list[str] = []
+    mapping = None
+    for index, cells in enumerate(rows[:25]):
+        maybe = lab_mapping_for(cells)
+        if maybe:
+            header_at = index
+            headers = cells
+            mapping = maybe
+            break
+    if not mapping or header_at is None:
+        return None
+    data_rows = [(index + 1, cells) for index, cells in enumerate(rows[header_at + 1 :], start=header_at + 1)]
+    return {"kind": "lab", "mapping": mapping, "records": _records_from_header_rows("csv", header_at + 1, headers, data_rows, "lab"), "sheets": ["csv"]}
+
+
+def _plant_headers(raw: dict) -> bool:
+    keys = {header_key(key) for key in raw}
+    return "item" in keys and "description" in keys
+
+
+def parse_plant_upload(path: Path) -> dict | None:
+    suffix = path.suffix.lower()
+    if suffix == ".xlsx":
+        records, sheets = read_plant_xlsx(path)
+    elif suffix == ".csv":
+        records, sheets = read_plant_csv(path)
+    else:
+        return None
+    if not records or not _plant_headers(records[0]["raw"]):
+        return None
+    return {"kind": "plant", "mapping": PLANT_MAPPING, "records": records, "sheets": sheets}
+
+
+def parse_uploaded_inventory(path: Path) -> dict | None:
+    suffix = path.suffix.lower()
+    if suffix == ".docx":
+        return parse_lab_docx(path)
+    if suffix == ".xlsx":
+        return parse_lab_xlsx(path) or parse_plant_upload(path)
+    if suffix == ".csv":
+        return parse_lab_csv(path) or parse_plant_upload(path)
+    return None
+
+
+def text_looks_like_inventory(text: str) -> bool:
+    haystack = (text or "").casefold()
+    lab = "instrument tag" in haystack and "manufacturer" in haystack and "model" in haystack
+    plant = "item" in haystack and "description" in haystack and ("remarks" in haystack or "system" in haystack)
+    return lab or plant

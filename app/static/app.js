@@ -259,28 +259,52 @@ function renderAssignPanel() {
   </form>`;
 }
 
+function renderFileBody(file) {
+  if (file.already_loaded || file.status === "loaded") {
+    const label = file.inventory_category === "process" ? "פתח ציוד תהליך / ייצור" : "פתח ציוד מעבדה";
+    return `
+      <p>${esc(file.summary || "")}</p>
+      <div class="actions">
+        <button class="btn-primary" type="button" data-go="inventory" data-category="${esc(file.inventory_category || "lab")}" data-query="">${label}</button>
+        <button class="btn" type="button" data-action="dismiss-upload" data-file="${esc(file.id)}">סגור</button>
+      </div>`;
+  }
+  if (file.imported_list || file.status === "imported") {
+    const query = (file.added_tags || [])[0] || "";
+    const label = file.inventory_category === "process" ? "פתח ציוד תהליך / ייצור" : "פתח את המלאי";
+    return `
+      <p>${esc(file.summary || "")}</p>
+      <div class="actions">
+        <button class="btn-primary" type="button" data-go="inventory" data-category="${esc(file.inventory_category || "")}" data-query="${esc(query)}">${label}</button>
+        <button class="btn" type="button" data-action="dismiss-upload" data-file="${esc(file.id)}">סגור</button>
+      </div>`;
+  }
+  return `
+    ${file.text ? `<p>${tag(String(file.text).slice(0, 180))}</p>` : ""}
+    <p>${esc(file.summary || "")}</p>
+    ${(file.links || []).map((link) => `<p class="muted">הצעה: ${tag(link.tag_norm || link.asset_id)} · ${esc(link.reason || "")}</p>`).join("")}
+    ${file.user_locked ? `<p class="muted">השיוך אושר ולא יוחלף אוטומטית.</p>` : `
+      <div class="actions">
+        ${(file.links || []).length ? `<button class="btn-primary" type="button" data-confirm="${esc(file.id)}">אשר את השיוך</button>` : ""}
+        <button class="btn" type="button" data-action="open-assign" data-file="${esc(file.id)}">שייך לנכס אחר</button>
+      </div>
+      ${S.assignFile === file.id ? renderAssignPanel() : ""}
+      <form data-action="create-asset" data-file="${esc(file.id)}">
+        <label>נכס חדש, רק אם אין רשומה<input name="name" placeholder="שם שהקלדתם"></label>
+        <button class="btn" type="submit">צור נכס ושייך</button>
+      </form>`}`;
+}
+
 function renderUpload() {
   const files = (S.uploads || []).map((file) => `
     <article class="card" style="margin-bottom:8px" data-file="${esc(file.id)}">
       <b>${tag(file.name || "טקסט")}</b>
       <p>${esc(file.confidence_label)} · ${esc(file.doc_type || "")}</p>
-      ${file.text ? `<p>${tag(String(file.text).slice(0, 180))}</p>` : ""}
-      <p>${esc(file.summary || "")}</p>
-      ${(file.links || []).map((link) => `<p class="muted">הצעה: ${tag(link.tag_norm || link.asset_id)} · ${esc(link.reason || "")}</p>`).join("")}
-      ${file.user_locked ? `<p class="muted">השיוך אושר ולא יוחלף אוטומטית.</p>` : `
-        <div class="actions">
-          ${(file.links || []).length ? `<button class="btn-primary" type="button" data-confirm="${esc(file.id)}">אשר את השיוך</button>` : ""}
-          <button class="btn" type="button" data-action="open-assign" data-file="${esc(file.id)}">שייך לנכס אחר</button>
-        </div>
-        ${S.assignFile === file.id ? renderAssignPanel() : ""}
-        <form data-action="create-asset" data-file="${esc(file.id)}">
-          <label>נכס חדש, רק אם אין רשומה<input name="name" placeholder="שם שהקלדתם"></label>
-          <button class="btn" type="submit">צור נכס ושייך</button>
-        </form>`}
+      ${renderFileBody(file)}
     </article>`).join("");
   return `
     <div class="top"><h1>העלאה</h1></div>
-    <p>אפשר להעלות קובץ, כמה קבצים, או להדביק טקסט. בלי לבחור קודם נכס. שיוך לא ודאי מחכה לאישור.</p>
+    <p>אפשר להעלות קובץ, כמה קבצים, או להדביק טקסט. רשימת מלאי נכנסת למלאי. מסמך בודד עם שיוך לא ודאי מחכה לאישור.</p>
     <form class="card" data-action="upload">
       <label class="btn file">בחירת קבצים<input type="file" name="files" multiple accept=".pdf,.doc,.docx,.xls,.xlsx,.csv,.txt,.rtf,.png,.jpg,.jpeg,.webp,image/*"></label>
       <label>או טקסט<textarea name="note" placeholder="הדביקו כאן מידע, מכתב, או הצעה"></textarea></label>
@@ -350,6 +374,7 @@ document.getElementById("app").addEventListener("click", async (event) => {
   if (button.dataset.go) {
     S.category = button.dataset.category || "";
     S.attention = button.dataset.attention || "";
+    if (button.hasAttribute("data-query")) S.query = button.dataset.query || "";
     if (button.dataset.go === "inventory" && button.dataset.category !== undefined && button.closest(".grid")) {
       S.category = button.dataset.category || "";
     }
@@ -454,6 +479,12 @@ document.getElementById("app").addEventListener("click", async (event) => {
   if (button.dataset.confirm) {
     await api("/api/uploads/" + encodeURIComponent(button.dataset.confirm), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "confirm" }) });
     S.notice = "השיוך אושר.";
+    await loadUploads();
+    return;
+  }
+  if (button.dataset.action === "dismiss-upload") {
+    await api("/api/uploads/" + encodeURIComponent(button.dataset.file), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "dismiss" }) });
+    S.notice = "ההודעה נסגרה.";
     await loadUploads();
     return;
   }

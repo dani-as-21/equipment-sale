@@ -428,6 +428,8 @@ CREATE TABLE IF NOT EXISTS project_files (
   summary TEXT,
   status TEXT NOT NULL,
   user_locked INTEGER NOT NULL DEFAULT 0,
+  matched_source_id TEXT,
+  matched_category TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -511,6 +513,11 @@ def init_db(conn: sqlite3.Connection | None = None) -> None:
     if own:
         conn = connect()
     conn.executescript(SCHEMA)
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(project_files)")}
+    if "matched_source_id" not in columns:
+        conn.execute("ALTER TABLE project_files ADD COLUMN matched_source_id TEXT")
+    if "matched_category" not in columns:
+        conn.execute("ALTER TABLE project_files ADD COLUMN matched_category TEXT")
     if own:
         conn.commit()
         conn.close()

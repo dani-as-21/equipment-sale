@@ -528,8 +528,11 @@ def ensure_questions(conn: sqlite3.Connection, created_at: str) -> None:
 
 
 def list_uploads(conn: sqlite3.Connection) -> dict:
+    from app.logic import now_iso
+
+    reconcile_known_sources(conn, now_iso())
     items = []
-    for row in conn.execute("SELECT id FROM project_files ORDER BY created_at DESC LIMIT 30"):
+    for row in conn.execute("SELECT id FROM project_files WHERE status != 'dismissed' ORDER BY created_at DESC LIMIT 30"):
         items.append(_public_file(conn, row["id"]))
     return {"files": items}
 
@@ -675,7 +678,19 @@ def _public_file(conn: sqlite3.Connection, file_id: str) -> dict:
     row = conn.execute("SELECT * FROM project_files WHERE id = ?", (file_id,)).fetchone()
     if not row:
         raise LookupError("הקובץ לא נמצא.")
-    links = [dict(item) for item in conn.execute("SELECT * FROM project_file_links WHERE file_id = ?", (file_id,))]
+    links = []
+    if row["status"] not in {"loaded", "imported", "dismissed"}:
+        links = [dict(item) for item in conn.execute("SELECT * FROM project_file_links WHERE file_id = ?", (file_id,))]
+    added_tags = []
+    note_text = row["note_text"] or ""
+    if note_text.startswith("TAGS:"):
+        added_tags = [item for item in note_text[5:].split("|") if item]
+    source_name = ""
+    if row["matched_source_id"]:
+        source = conn.execute("SELECT display_name, filename FROM source_files WHERE id = ?", (row["matched_source_id"],)).fetchone()
+        if source:
+            source_name = source["display_name"] or source["filename"] or ""
+    show_text = row["status"] not in {"loaded", "imported", "dismissed"}
     return {
         "id": row["id"],
         "name": row["original_name"] or "",
@@ -686,8 +701,13 @@ def _public_file(conn: sqlite3.Connection, file_id: str) -> dict:
         "status": row["status"],
         "user_locked": bool(row["user_locked"]),
         "duplicate": False,
+        "already_loaded": row["status"] == "loaded",
+        "imported_list": row["status"] == "imported",
+        "source_name": source_name,
+        "inventory_category": row["matched_category"] or "",
+        "added_tags": added_tags,
         "links": links,
-        "text": (row["extracted_text"] or "")[:700],
+        "text": (row["extracted_text"] or "")[:700] if show_text else "",
     }
 
 
@@ -705,7 +725,369 @@ def _store_links(conn, file_id: str, suggestions: list[dict], confidence: str, l
         )
 
 
+FIELD_LABELS = {
+    "description": "תיאור",
+    "manufacturer": "יצרן",
+    "model": "דגם",
+    "serial": "מספר סידורי",
+    "installation_raw": "התקנה",
+}
+
+
+def _category_for_kind(kind: str) -> str:
+    return "lab" if (kind or "").startswith("lab") else "process"
+
+
+def _source_category_label(category: str) -> str:
+    return "ציוד מעבדה" if category == "lab" else "ציוד תהליך / ייצור"
+
+
+def _already_loaded_summary(source_name: str, filename: str) -> str:
+    label = source_name or filename or "קובץ שכבר נטען"
+    extra = f" ({filename})" if filename and filename not in label else ""
+    return f"הקובץ הזה כבר במלאי. הוא זהה ל{label}{extra}. לא נוצרו נכסים חדשים ולא נפתחו שיוכים."
+
+
+def _save_project_file(
+    conn: sqlite3.Connection,
+    *,
+    file_id: str,
+    digest: str,
+    name: str,
+    stored: str,
+    suffix: str,
+    text: str,
+    note: str,
+    doc_type: str,
+    confidence: str,
+    summary: str,
+    status: str,
+    source_id: str,
+    category: str,
+    created_at: str,
+) -> None:
+    existing = conn.execute("SELECT id FROM project_files WHERE id = ? OR sha256 = ?", (file_id, digest)).fetchone()
+    if existing:
+        conn.execute(
+            """
+            UPDATE project_files
+            SET original_name = ?, stored_path = ?, media_kind = ?, extracted_text = ?, note_text = ?,
+                doc_type = ?, confidence = ?, summary = ?, status = ?, user_locked = 0,
+                matched_source_id = ?, matched_category = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                name or "טקסט",
+                stored,
+                suffix.lstrip(".") or "text",
+                (text or "")[:30000],
+                note,
+                doc_type,
+                confidence,
+                summary,
+                status,
+                source_id,
+                category,
+                created_at,
+                existing["id"],
+            ),
+        )
+        conn.execute("DELETE FROM project_file_links WHERE file_id = ?", (existing["id"],))
+        return
+    conn.execute(
+        """
+        INSERT INTO project_files (
+          id, sha256, original_name, stored_path, media_kind, extracted_text, note_text,
+          doc_type, confidence, summary, status, user_locked, matched_source_id, matched_category,
+          created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
+        """,
+        (
+            file_id,
+            digest,
+            name or "טקסט",
+            stored,
+            suffix.lstrip(".") or "text",
+            (text or "")[:30000],
+            note,
+            doc_type,
+            confidence,
+            summary,
+            status,
+            source_id,
+            category,
+            created_at,
+            created_at,
+        ),
+    )
+
+
+def _present_already_loaded(conn: sqlite3.Connection, *, digest: str, name: str, stored: Path, suffix: str, source: sqlite3.Row, created_at: str, duplicate: bool) -> dict:
+    file_id = "FIL-" + digest[:16]
+    category = _category_for_kind(source["kind"])
+    summary = _already_loaded_summary(source["display_name"] or "", source["filename"] or "")
+    _save_project_file(
+        conn,
+        file_id=file_id,
+        digest=digest,
+        name=name,
+        stored=str(stored),
+        suffix=suffix,
+        text="",
+        note="",
+        doc_type="רשימת מלאי",
+        confidence="confirmed",
+        summary=summary,
+        status="loaded",
+        source_id=source["id"],
+        category=category,
+        created_at=created_at,
+    )
+    public = _public_file(conn, file_id)
+    public["duplicate"] = duplicate
+    public["already_loaded"] = True
+    return public
+
+
+def reconcile_known_sources(conn: sqlite3.Connection, created_at: str) -> None:
+    rows = conn.execute(
+        """
+        SELECT p.sha256, p.original_name, p.stored_path, s.id AS source_id
+        FROM project_files p
+        JOIN source_files s ON s.sha256 = p.sha256
+        WHERE p.status = 'pending'
+        """
+    ).fetchall()
+    for row in rows:
+        source = conn.execute("SELECT * FROM source_files WHERE id = ?", (row["source_id"],)).fetchone()
+        stored = Path(row["stored_path"] or "")
+        suffix = stored.suffix or ".docx"
+        _present_already_loaded(
+            conn,
+            digest=row["sha256"],
+            name=row["original_name"] or source["filename"],
+            stored=stored,
+            suffix=suffix,
+            source=source,
+            created_at=created_at,
+            duplicate=False,
+        )
+
+
+def _norm_field(value: str) -> str:
+    return re.sub(r"\s+", " ", (value or "").strip())
+
+
+def _matching_rows(conn: sqlite3.Connection, tag_norm: str) -> list[sqlite3.Row]:
+    if not tag_norm:
+        return []
+    return conn.execute(
+        "SELECT * FROM inventory_rows WHERE kind = 'equipment' AND tag_norm = ?",
+        (tag_norm,),
+    ).fetchall()
+
+
+def _insert_source_row(conn: sqlite3.Connection, source_id: str, row: dict) -> None:
+    conn.execute(
+        """
+        INSERT INTO inventory_rows (
+          id, source_file_id, kind, sheet_name, original_row, identity_area, listed_area,
+          tag_original, tag_norm, description, manufacturer, model, serial, serial_norm,
+          quantity, remarks, specs, material, system_number, efd, installation_raw,
+          labels_json, raw_json, duplicate_group, source_kind
+        ) VALUES (
+          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        )
+        """,
+        (
+            row["id"],
+            source_id,
+            row["kind"],
+            row["sheet_name"],
+            row["original_row"],
+            row["identity_area"],
+            row["listed_area"],
+            row["tag_original"],
+            row["tag_norm"],
+            row["description"],
+            row["manufacturer"],
+            row["model"],
+            row["serial"],
+            row["serial_norm"],
+            row["quantity"],
+            row["remarks"],
+            row["specs"],
+            row["material"],
+            row["system_number"],
+            row["efd"],
+            row["installation_raw"],
+            json.dumps(row["labels"], ensure_ascii=False),
+            json.dumps(row["raw"], ensure_ascii=False),
+            row["duplicate_group"],
+            row["source_kind"],
+        ),
+    )
+
+
+def _remember_source(conn: sqlite3.Connection, *, digest: str, name: str, kind: str, created_at: str) -> str:
+    source_id = "FILE-" + digest[:12]
+    existing = conn.execute("SELECT id FROM source_files WHERE sha256 = ?", (digest,)).fetchone()
+    if existing:
+        return existing["id"]
+    stored_kind = "lab-upload" if kind == "lab" else "plant-upload"
+    conn.execute(
+        """
+        INSERT INTO source_files (id, kind, filename, display_name, sha256, imported_at, mapping_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (source_id, stored_kind, name or source_id, name or source_id, digest, created_at, "{}"),
+    )
+    return source_id
+
+
+def _apply_inventory_list(conn: sqlite3.Connection, parsed: dict, *, digest: str, name: str, created_at: str) -> dict:
+    from app.importer import upsert_reviews, _build_rows
+
+    built = _build_rows(parsed["records"], parsed["mapping"], digest, parsed["kind"])
+    equipment = [row for row in built if row["kind"] == "equipment" and (row.get("tag_norm") or row.get("description"))]
+    added: list[str] = []
+    enriched = 0
+    conflicts: list[dict] = []
+    pending_rows: list[dict] = []
+    seen_new: set[str] = set()
+    for row in equipment:
+        tag_norm = row.get("tag_norm") or ""
+        if tag_norm and tag_norm in seen_new:
+            conflicts.append(
+                {
+                    "kind": "field_conflict",
+                    "queue": "product",
+                    "dedupe_key": f"upload:file-tag:{digest}:{tag_norm}",
+                    "priority": "medium",
+                    "question": f"התג {row['tag_original'] or tag_norm} מופיע יותר מפעם אחת ברשימה שהועלתה. לא נוצרה שורה נוספת עבור החזרה.",
+                    "row_ids": [],
+                    "payload": {"tag": row["tag_original"] or tag_norm},
+                }
+            )
+            continue
+        matches = _matching_rows(conn, tag_norm)
+        if row.get("tag_norm") and len(matches) > 1:
+            conflicts.append(
+                {
+                    "kind": "field_conflict",
+                    "queue": "product",
+                    "dedupe_key": f"upload:tag:{row['tag_norm']}",
+                    "priority": "medium",
+                    "question": f"לתג {row['tag_original'] or row['tag_norm']} יש יותר מרשומה אחת במלאי. הרשימה שהועלתה לא יצרה שורה נוספת ולא שינתה ערכים.",
+                    "row_ids": [item["id"] for item in matches],
+                    "payload": {"tag": row["tag_original"] or row["tag_norm"]},
+                }
+            )
+            continue
+        if len(matches) == 1:
+            current = matches[0]
+            updates: dict[str, str] = {}
+            for field, label in FIELD_LABELS.items():
+                new_value = _norm_field(row.get(field) or "")
+                old_value = _norm_field(current[field] or "")
+                if not new_value or new_value.casefold() == old_value.casefold():
+                    continue
+                if not old_value:
+                    updates[field] = row.get(field) or ""
+                    enriched += 1
+                    continue
+                conflicts.append(
+                    {
+                        "kind": "field_conflict",
+                        "queue": "product",
+                        "dedupe_key": f"upload:field:{current['id']}:{field}",
+                        "priority": "medium",
+                        "question": f"לתג {current['tag_original'] or current['tag_norm']} השדה {label} ברשימה שהועלתה הוא {new_value}, ובמלאי רשום {old_value}. הערך לא הוחלף.",
+                        "row_ids": [current["id"]],
+                        "payload": {"tag": current["tag_original"] or "", "field": field, "uploaded": new_value, "existing": old_value},
+                    }
+                )
+            if updates:
+                if "serial" in updates:
+                    from app.importer import norm_id, two_serials
+
+                    serial = updates["serial"]
+                    updates["serial_norm"] = "" if two_serials(serial) else norm_id(serial)
+                assignments = ", ".join(f"{field} = ?" for field in updates)
+                conn.execute(
+                    f"UPDATE inventory_rows SET {assignments} WHERE id = ?",
+                    (*updates.values(), current["id"]),
+                )
+            continue
+        if tag_norm:
+            seen_new.add(tag_norm)
+        pending_rows.append(row)
+        added.append(row.get("tag_original") or row.get("description") or row["id"])
+    source_id = ""
+    if pending_rows:
+        source_id = _remember_source(conn, digest=digest, name=name, kind=parsed["kind"], created_at=created_at)
+        for row in pending_rows:
+            _insert_source_row(conn, source_id, row)
+        ensure_slash_components(conn, created_at)
+    if conflicts:
+        upsert_reviews(conn, conflicts, created_at)
+    category = _category_for_kind(parsed["kind"])
+    return {
+        "added": added,
+        "enriched": enriched,
+        "conflicts": len(conflicts),
+        "source_id": source_id,
+        "category": category,
+        "equipment": len(equipment),
+    }
+
+
+def _list_summary(result: dict, source_name: str, filename: str) -> tuple[str, str]:
+    added = result["added"]
+    category = _source_category_label(result["category"])
+    if not result["equipment"]:
+        return "imported", "הרשימה נקראה ואין בה שורות ציוד. לא נוצרו נכסים ולא שיוכים."
+    if not added and not result["enriched"] and not result["conflicts"]:
+        return "loaded", _already_loaded_summary(source_name, filename)
+    parts = []
+    if added:
+        shown = ", ".join(added[:8])
+        more = f" ועוד {len(added) - 8}" if len(added) > 8 else ""
+        noun = "פריט" if len(added) == 1 else "פריטים"
+        parts.append(f"נוסף {noun} ל{category}: {shown}{more}." if len(added) == 1 else f"נוספו {len(added)} {noun} ל{category}: {shown}{more}.")
+    if result["enriched"]:
+        parts.append(f"מולאו {result['enriched']} שדות שהיו ריקים.")
+    if result["conflicts"]:
+        parts.append(f"{result['conflicts']} סתירות נשארו שאלות. ערך קיים לא הוחלף.")
+    parts.append("לא נוצר מחיר.")
+    status = "imported" if added or result["enriched"] or result["conflicts"] else "loaded"
+    return status, " ".join(parts)
+
+
+def _dominant_source(conn: sqlite3.Connection, parsed: dict) -> sqlite3.Row | None:
+    from app.importer import _build_rows
+
+    built = _build_rows(parsed["records"], parsed["mapping"], "preview", parsed["kind"])
+    tags = [row["tag_norm"] for row in built if row["kind"] == "equipment" and row.get("tag_norm")]
+    if not tags:
+        return None
+    counts: dict[str, int] = defaultdict(int)
+    for tag in tags:
+        for row in conn.execute(
+            "SELECT source_file_id FROM inventory_rows WHERE kind = 'equipment' AND tag_norm = ?",
+            (tag,),
+        ):
+            counts[row["source_file_id"]] += 1
+    if not counts:
+        return None
+    source_id = max(counts, key=counts.get)
+    if counts[source_id] < len(set(tags)):
+        return None
+    return conn.execute("SELECT * FROM source_files WHERE id = ?", (source_id,)).fetchone()
+
+
 def receive_upload(conn: sqlite3.Connection, *, name: str, data: bytes, note: str, photo_dir: Path, created_at: str) -> dict:
+    from app.importer import parse_uploaded_inventory, text_looks_like_inventory
     from app.intake import extract_document
 
     note = (note or "").strip()
@@ -713,27 +1095,127 @@ def receive_upload(conn: sqlite3.Connection, *, name: str, data: bytes, note: st
         raise ValueError("צריך קובץ או טקסט.")
     payload = data or note.encode()
     digest = hashlib.sha256(payload).hexdigest()
-    existing = conn.execute("SELECT id, user_locked FROM project_files WHERE sha256 = ?", (digest,)).fetchone()
-    if existing:
-        public = _public_file(conn, existing["id"])
-        public["duplicate"] = True
-        public["summary"] = "הקובץ כבר נשמר. לא נוצר נכס, קשר או שאלה נוספים."
-        return public
     suffix = Path(name or "note.txt").suffix.lower()
     file_id = "FIL-" + digest[:16]
     photo_dir.mkdir(parents=True, exist_ok=True)
     stored = photo_dir / f"{file_id}{suffix or '.txt'}"
     if data:
-        stored.write_bytes(data)
+        if not stored.exists():
+            stored.write_bytes(data)
+    else:
+        stored.write_text(note, encoding="utf-8")
+    source = conn.execute("SELECT * FROM source_files WHERE sha256 = ?", (digest,)).fetchone()
+    existing = conn.execute("SELECT id, status FROM project_files WHERE sha256 = ?", (digest,)).fetchone()
+    if source:
+        return _present_already_loaded(
+            conn,
+            digest=digest,
+            name=name or source["filename"],
+            stored=stored,
+            suffix=suffix,
+            source=source,
+            created_at=created_at,
+            duplicate=existing is not None,
+        )
+    if existing and existing["status"] in {"loaded", "imported", "dismissed"}:
+        if existing["status"] == "dismissed":
+            restore = "loaded" if conn.execute("SELECT matched_source_id FROM project_files WHERE id = ?", (existing["id"],)).fetchone()["matched_source_id"] else "imported"
+            conn.execute("UPDATE project_files SET status = ?, updated_at = ? WHERE id = ?", (restore, created_at, existing["id"]))
+        public = _public_file(conn, existing["id"])
+        public["duplicate"] = True
+        if public["status"] == "loaded":
+            public["summary"] = public["summary"] or "הקובץ הזה כבר במלאי. לא נוצרו נכסים חדשים."
+        else:
+            public["summary"] = "הקובץ כבר נשמר ונקלט למלאי. לא נוספו נכסים שוב."
+        return public
+    if existing:
+        public = _public_file(conn, existing["id"])
+        public["duplicate"] = True
+        public["summary"] = "הקובץ כבר נשמר. לא נוצר נכס, קשר או שאלה נוספים."
+        return public
+    parsed = parse_uploaded_inventory(stored) if data else None
+    if parsed:
+        same = _dominant_source(conn, parsed)
+        preview = _apply_inventory_list(conn, parsed, digest=digest, name=name or stored.name, created_at=created_at)
+        if not preview["added"] and not preview["enriched"] and not preview["conflicts"] and same:
+            return _present_already_loaded(
+                conn,
+                digest=digest,
+                name=name or same["filename"],
+                stored=stored,
+                suffix=suffix,
+                source=same,
+                created_at=created_at,
+                duplicate=False,
+            )
+        if not preview["added"] and not preview["enriched"] and not preview["conflicts"]:
+            status, summary = "loaded", "כל שורות הרשימה כבר במלאי. לא נוצרו נכסים חדשים ולא נפתחו שיוכים."
+            category = preview["category"]
+            source_id = ""
+        else:
+            status, summary = _list_summary(preview, "", name or "")
+            category = preview["category"]
+            source_id = preview["source_id"]
+            if status == "loaded" and same:
+                return _present_already_loaded(
+                    conn,
+                    digest=digest,
+                    name=name or same["filename"],
+                    stored=stored,
+                    suffix=suffix,
+                    source=same,
+                    created_at=created_at,
+                    duplicate=False,
+                )
+        _save_project_file(
+            conn,
+            file_id=file_id,
+            digest=digest,
+            name=name or stored.name,
+            stored=str(stored),
+            suffix=suffix,
+            text="",
+            note=note or ("TAGS:" + "|".join(preview["added"][:12])),
+            doc_type="רשימת מלאי",
+            confidence="confirmed",
+            summary=summary,
+            status=status,
+            source_id=source_id,
+            category=category,
+            created_at=created_at,
+        )
+        public = _public_file(conn, file_id)
+        public["added_tags"] = preview["added"][:12]
+        return public
+    if data:
         extracted = extract_document(stored)
         text = extracted.get("text") or ""
         unread = extracted.get("note") or ""
     else:
-        stored.write_text(note, encoding="utf-8")
         text = note
         unread = ""
     if note and note not in text:
         text = (text + "\n" + note).strip()
+    if text_looks_like_inventory(text):
+        summary = "הקובץ נראה כמו רשימת מלאי, אבל השורות לא נקראו בצורה חד-משמעית. לא נוספו נכסים ולא נפתחו שיוכים."
+        _save_project_file(
+            conn,
+            file_id=file_id,
+            digest=digest,
+            name=name or "טקסט",
+            stored=str(stored),
+            suffix=suffix,
+            text=text,
+            note=note,
+            doc_type="רשימת מלאי",
+            confidence="uncertain",
+            summary=summary,
+            status="imported",
+            source_id="",
+            category="",
+            created_at=created_at,
+        )
+        return _public_file(conn, file_id)
     doc_type = _doc_type(name or "", text, suffix)
     confidence, suggestions, reason = _suggestions(conn, text)
     if unread and confidence != "uncertain":
@@ -765,6 +1247,10 @@ def confirm_upload(conn: sqlite3.Connection, file_id: str, body: dict, created_a
     if not row:
         raise LookupError("הקובץ לא נמצא.")
     action = body.get("action") or "confirm"
+    if action == "dismiss":
+        conn.execute("UPDATE project_files SET status = 'dismissed', updated_at = ? WHERE id = ?", (created_at, file_id))
+        log_change(conn, actor=ACTOR_USER, action="dismiss_upload", entity_type="file", entity_id=file_id, prior={"status": row["status"]}, new={"status": "dismissed"}, created_at=created_at)
+        return _public_file(conn, file_id)
     if action == "create":
         name = (body.get("name") or "").strip()
         if len(name) < 2:

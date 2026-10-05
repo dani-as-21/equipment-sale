@@ -1,4 +1,4 @@
-const CACHE = "sale-shell-v3";
+const CACHE = "sale-shell-v4";
 const SHELL = ["/", "/static/app.js", "/static/style.css", "/static/manifest.webmanifest"];
 
 self.addEventListener("install", (event) => {

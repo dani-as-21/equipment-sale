@@ -57,6 +57,7 @@ async def lifespan(app: FastAPI):
 
         product.ensure_slash_components(conn, logic.now_iso())
         product.ensure_questions(conn, logic.now_iso())
+        product.reconcile_known_sources(conn, logic.now_iso())
         conn.commit()
     finally:
         conn.close()
