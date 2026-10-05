@@ -43,5 +43,8 @@ input, select, textarea { width: 100%; padding: 10px; border: 1px solid var(--li
 textarea { min-height: 90px; }
 .error { background: #fde8e8; padding: 8px 10px; border-radius: 10px; }
 .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.estimate { font-size: 1.05rem; padding: 12px 18px; }
+.figures { display: grid; gap: 8px; margin: 8px 0 12px; }
+.figures b { font-size: 1.35rem; }
 .file input { display: none; }
 @media (max-width: 640px) { .grid { grid-template-columns: 1fr; } }

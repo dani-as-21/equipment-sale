@@ -1,7 +1,8 @@
 """The project-manager view: sellable assets, groupings, questions, and evidence.
 
-This layer does not price anything. A source row stays a source row. A machine
-is one sellable asset, and its components are not listed again beside it.
+A source row stays a source row. A machine is one sellable asset, and its
+components are not listed again beside it. A value estimate is published only
+from prices that were stored or found for that same sellable asset.
 """
 
 from __future__ import annotations
@@ -313,7 +314,7 @@ def dashboard(conn: sqlite3.Connection) -> dict:
         "uncertain_relationships": uncertain,
         "pending_files": pending,
         "open_tasks": open_tasks,
-        "note": "מכונה מוצגת פעם אחת. רכיביה נשארים בכרטיס ולא נספרים שוב כנכס נפרד. אין בגרסה הזו טווח שווי.",
+        "note": "מכונה מוצגת פעם אחת. רכיביה נשארים בכרטיס ולא נספרים שוב כנכס נפרד. הערכת שווי נמצאת בכרטיס. בלי ראיות אין טווח.",
     }
 
 
@@ -481,6 +482,7 @@ def asset_detail(conn: sqlite3.Connection, asset_id: str) -> dict:
         "files": _files_for(conn, asset_id),
         "questions": _card_questions(asset, machine, technical),
         "evidence": _evidence_for(conn, asset_id),
+        "estimate": _latest_estimate(conn, asset_id),
         "history": _history(conn, asset_id),
         "source_row": bool(row),
     }
@@ -613,6 +615,10 @@ def update_task(conn: sqlite3.Connection, task_id: str, body: dict, created_at: 
 def _doc_type(name: str, text: str, suffix: str) -> str:
     haystack = f"{name}\n{text}".casefold()
     pairs = (
+        ("הצעת קונה", ("buyer offer", "הצעת קונה")),
+        ("מחיר רכישה", ("purchase price", "invoice", "מחיר רכישה")),
+        ("עלות תחליף", ("replacement", "תחליף")),
+        ("תוצאת מכרז", ("auction", "מכירה פומבית")),
         ("הצעת מחיר", ("quotation", "quote", "הצעת מחיר", "הצעת רכש")),
         ("ראיית שווי", ("appraisal", "auction", "market value", "שומה", "שווי שוק")),
         ("תעודה", ("certificate", "תעודה")),
@@ -1223,7 +1229,40 @@ def receive_upload(conn: sqlite3.Connection, *, name: str, data: bytes, note: st
     elif unread and not text.strip():
         confidence = "uncertain"
         reason = unread
+    amounts = _upload_amounts(text)
+    if len(suggestions) == 1 and confidence == "likely" and amounts:
+        suggestion = suggestions[0]
+        summary = _auto_amount_summary(doc_type, suggestion.get("tag") or "", amounts)
+        conn.execute(
+            """
+            INSERT INTO project_files (
+              id, sha256, original_name, stored_path, media_kind, extracted_text, note_text,
+              doc_type, confidence, summary, status, user_locked, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'confirmed', ?, 'filed', 1, ?, ?)
+            """,
+            (file_id, digest, name or "טקסט", str(stored), suffix.lstrip(".") or "text", text[:30000], note, doc_type, summary, created_at, created_at),
+        )
+        conn.execute(
+            """
+            INSERT INTO project_file_links (id, file_id, asset_id, tag_norm, confidence, reason, user_locked)
+            VALUES (?, ?, ?, ?, 'confirmed', ?, 1)
+            """,
+            (
+                "FL-" + _digest(f"{file_id}|{suggestion['asset_id']}|auto"),
+                file_id,
+                suggestion["asset_id"],
+                suggestion.get("tag_norm") or "",
+                "התג מתאים לרשומה אחת והסכום זוהה, ולכן הקובץ שויך בלי סיווג ידני.",
+            ),
+        )
+        _record_amounts(conn, suggestion["asset_id"], amounts, file_id, name or "טקסט", created_at)
+        log_change(conn, actor="קליטה", action="upload", entity_type="file", entity_id=file_id, prior=None, new={"name": name, "confidence": "confirmed", "suggestions": [suggestion.get("tag") or ""]}, created_at=created_at)
+        public = _public_file(conn, file_id)
+        public["suggestions"] = [suggestion]
+        return public
     summary = f"זה {doc_type}. {reason}"
+    if amounts and not (len(suggestions) == 1 and confidence == "likely"):
+        summary += " " + _amount_phrase(amounts) + " הסכום יישמר על הנכס אחרי שתבחרו אותו."
     if confidence == "uncertain":
         summary += " לא שויך עד שתאשרו או תבחרו נכס."
     conn.execute(
@@ -1286,7 +1325,9 @@ def confirm_upload(conn: sqlite3.Connection, file_id: str, body: dict, created_a
         (created_at, "השיוך אושר על ידי המשתמש ולא יוחלף בקליטה הבאה.", file_id),
     )
     log_change(conn, actor=ACTOR_USER, action="file_link", entity_type="file", entity_id=file_id, prior={"assets": prior}, new={"assets": asset_ids}, created_at=created_at)
+    amounts = _upload_amounts(row["extracted_text"] or "")
     for asset_id in asset_ids:
+        _record_amounts(conn, asset_id, amounts, file_id, row["original_name"] or "טקסט", created_at)
         log_change(conn, actor=ACTOR_USER, action="file_link", entity_type="asset", entity_id=asset_id, prior=None, new={"file_id": file_id}, created_at=created_at)
     return _public_file(conn, file_id)
 
@@ -1308,6 +1349,193 @@ def set_relationship(conn: sqlite3.Connection, asset_id: str, body: dict, create
     else:
         raise ValueError("אפשר לאשר את הקשר או להוציא רכיב. שורת המקור לא נמחקת.")
     return asset_detail(conn, asset_id)
+
+
+def _upload_amounts(text: str) -> list[dict]:
+    from app.estimate import valuation_amounts
+
+    return valuation_amounts(text or "")
+
+
+def _amount_phrase(amounts: list[dict]) -> str:
+    from app.estimate import format_amount
+
+    bits = [f"{VALUE_KINDS.get(item['kind'], item['kind'])} {format_amount(item['amount'])} {item['currency']}" for item in amounts[:4]]
+    return "נמצאו סכומים: " + "; ".join(bits) + "."
+
+
+def _auto_amount_summary(doc_type: str, tag: str, amounts: list[dict]) -> str:
+    target = tag or "הנכס"
+    return f"זה {doc_type}. {_amount_phrase(amounts)} הם שויכו אוטומטית ל-{target}. לא נדרש סיווג ידני ולא נוצר נכס חדש."
+
+
+def _record_amounts(conn: sqlite3.Connection, asset_id: str, amounts: list[dict], file_id: str, name: str, created_at: str) -> None:
+    from app.estimate import format_amount
+
+    for item in amounts:
+        evidence_id = "EV-" + _digest(f"{asset_id}|{file_id}|{item['kind']}|{item['amount']}|{item['currency']}")
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO valuation_notes (
+              id, asset_id, source, evidence_date, currency, price_text, description, manufacturer,
+              model, year, condition_text, location, value_kind, body, file_id, created_at
+            ) VALUES (?, ?, ?, '', ?, ?, ?, '', '', '', '', '', ?, '', ?, ?)
+            """,
+            (
+                evidence_id,
+                asset_id,
+                name,
+                item["currency"],
+                format_amount(item["amount"]),
+                item.get("snippet") or "",
+                item["kind"],
+                file_id,
+                created_at,
+            ),
+        )
+
+
+def _latest_estimate(conn: sqlite3.Connection, asset_id: str) -> dict | None:
+    row = conn.execute("SELECT payload_json FROM asset_estimates WHERE asset_id = ?", (asset_id,)).fetchone()
+    if not row:
+        return None
+    payload = parse_json(row["payload_json"], None)
+    return payload if isinstance(payload, dict) else None
+
+
+def _estimate_context(conn: sqlite3.Connection, asset_id: str) -> dict:
+    data = _load(conn)
+    asset = _find_asset(conn, asset_id)
+    if not asset:
+        raise LookupError("הנכס לא נמצא.")
+    primary = data["by_id"].get(asset_id)
+    component_tags: list[str] = []
+    machine = next((item for item in data["machines"] if item["id"] == asset_id), None)
+    if machine:
+        parent = next((item for item in data["members"].get(asset_id, []) if item.get("member_role") == "parent"), None)
+        if parent and parent.get("inventory_row_id"):
+            primary = data["by_id"].get(parent["inventory_row_id"]) or primary
+        for member in data["members"].get(asset_id, []):
+            if member.get("member_role") != "parent" and member.get("tag_original"):
+                component_tags.append(member["tag_original"])
+    for comp in data["components"].get(asset_id, []):
+        if comp.get("link_status") != "active":
+            continue
+        if comp.get("tag_original"):
+            component_tags.append(comp["tag_original"])
+    manufacturer = ((primary or {}).get("manufacturer") or "").strip()
+    model = ((primary or {}).get("model") or "").strip()
+    specs = ((primary or {}).get("specs") or "").strip()
+    year = ""
+    if primary:
+        found_year = re.search(r"(?:19|20)\d{2}", primary.get("installation_raw") or "")
+        if found_year:
+            year = found_year.group(0)
+    labels = _labels(primary) if primary else []
+    notes = []
+    seen: set[tuple] = set()
+    condition_bits: list[str] = []
+    for row in conn.execute("SELECT * FROM valuation_notes WHERE asset_id = ? ORDER BY created_at", (asset_id,)):
+        if row["condition_text"]:
+            condition_bits.append(row["condition_text"])
+        if not year and row["year"]:
+            year = row["year"]
+        from app.estimate import _parse_number
+
+        amount_text = row["price_text"] or ""
+        currency = (row["currency"] or "").upper()
+        kind = row["value_kind"] or ""
+        parsed = _parse_number(amount_text)
+        key = (kind, currency, round(parsed, 2) if parsed is not None else amount_text)
+        if key in seen:
+            continue
+        seen.add(key)
+        notes.append(
+            {
+                "kind": kind,
+                "currency": currency,
+                "amount": amount_text,
+                "title": row["source"] or row["description"] or kind,
+                "detail": row["description"] or row["body"] or "",
+                "label": VALUE_KINDS.get(kind, kind),
+                "url": "",
+            }
+        )
+    for link in conn.execute(
+        """
+        SELECT p.id, p.original_name, p.extracted_text
+        FROM project_file_links l
+        JOIN project_files p ON p.id = l.file_id
+        WHERE l.asset_id = ? AND p.status = 'filed'
+        """,
+        (asset_id,),
+    ):
+        for item in _upload_amounts(link["extracted_text"] or ""):
+            key = (item["kind"], item["currency"], round(item["amount"], 2))
+            if key in seen:
+                continue
+            seen.add(key)
+            notes.append(
+                {
+                    "kind": item["kind"],
+                    "currency": item["currency"],
+                    "amount": str(item["amount"]),
+                    "title": link["original_name"] or item["kind"],
+                    "detail": item.get("snippet") or "",
+                    "label": VALUE_KINDS.get(item["kind"], item["kind"]),
+                    "url": "",
+                }
+            )
+    photo_count = conn.execute(
+        """
+        SELECT COUNT(*) AS n
+        FROM project_files p
+        JOIN project_file_links l ON l.file_id = p.id
+        WHERE l.asset_id = ? AND lower(p.media_kind) IN ('png', 'jpg', 'jpeg', 'webp', 'gif', 'image')
+        """,
+        (asset_id,),
+    ).fetchone()["n"]
+    condition = "; ".join(dict.fromkeys([*condition_bits, *labels]))
+    return {
+        "name": asset.get("name") or "",
+        "manufacturer": manufacturer,
+        "model": model,
+        "specs": specs,
+        "year": year,
+        "condition": condition,
+        "labels": labels,
+        "operational": condition,
+        "photo_count": photo_count,
+        "notes": notes,
+        "component_tags": component_tags,
+    }
+
+
+def estimate_asset(conn: sqlite3.Connection, asset_id: str, created_at: str) -> dict:
+    from app.estimate import build_estimate, research_market
+
+    context = _estimate_context(conn, asset_id)
+    if context["manufacturer"] and context["model"]:
+        research = research_market(context["manufacturer"], context["model"])
+    else:
+        research = {"hits": [], "note": "", "url": "", "query": ""}
+    result = build_estimate(context, research)
+    result["asset_id"] = asset_id
+    result["name"] = context["name"]
+    result["created_at"] = created_at
+    conn.execute(
+        """
+        INSERT INTO asset_estimates (asset_id, status, payload_json, created_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(asset_id) DO UPDATE SET
+          status = excluded.status,
+          payload_json = excluded.payload_json,
+          created_at = excluded.created_at
+        """,
+        (asset_id, result["status"], json.dumps(result, ensure_ascii=False), created_at),
+    )
+    log_change(conn, actor=ACTOR_USER, action="estimate", entity_type="asset", entity_id=asset_id, prior=None, new={"status": result["status"]}, created_at=created_at)
+    return result
 
 
 def add_evidence(conn: sqlite3.Connection, asset_id: str, body: dict, created_at: str) -> dict:

@@ -495,6 +495,13 @@ CREATE TABLE IF NOT EXISTS asset_components (
 
 CREATE INDEX IF NOT EXISTS idx_asset_components_asset ON asset_components(asset_id);
 CREATE INDEX IF NOT EXISTS idx_asset_components_row ON asset_components(inventory_row_id);
+
+CREATE TABLE IF NOT EXISTS asset_estimates (
+  asset_id TEXT PRIMARY KEY,
+  status TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
 """
 
 
